@@ -1,0 +1,40 @@
+# Time-series env: dolphin + MintPy + the WHIRLWIND unwrapper.
+#
+# Kept SEPARATE from isce3_env because compass 0.5.6 pins scipy >=1.0,<1.13
+# while dolphin 0.42.5 wants scipy >=1.12 -- co-installing forces the whole
+# stack onto scipy==1.12.0 / numpy<2. dolphin never needs compass; it only
+# reads rasters. Splitting costs ~3 GB of disk.
+#
+# python=3.12 here (not 3.11) so rasterio has a build against libgdal-core 3.12.x.
+#
+# Verified dry-run resolution on this machine 2026-08-13:
+#   python 3.12.13, dolphin 0.42.5, isce3 0.25.12 *_cpu, mintpy 1.6.4,
+#   opera-utils 0.25.6, whirlwind-insar 0.9.0, rasterio 1.5.0, gdal 3.12.4,
+#   numpy 2.4.6, scipy 1.18.0, jax 0.10.2, snaphu 0.4.1
+name: dolphin_env
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12
+  - dolphin
+  - opera-utils      # stitch_geometry_layers, CSLC/burst helpers
+  - whirlwind-insar  # the WHIRLWIND unwrapper used in 5.3 notebooks
+  - snaphu
+  - isce3            # for reading/inspecting GSLC HDF5 alongside dolphin
+  - mintpy
+
+  # --- I/O ---
+  - gdal
+  - libgdal-hdf5
+  - libgdal-netcdf
+  - h5py
+  - rasterio
+  - rioxarray
+
+  # --- notebooks ---
+  - matplotlib-base
+  - jupyterlab
+  - ipykernel
+  - ipympl
+  - pip
