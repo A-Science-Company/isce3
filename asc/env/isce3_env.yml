@@ -62,6 +62,28 @@ dependencies:
   - rasterio         # fits at py312 (rasterio 1.5.0 vs libgdal-core 3.12.4);
   - rioxarray        # it is the py311 pin that made these unsatisfiable
 
+  # --- close the module-level import gaps found by the completeness sweep ---
+  # Without these, `import <module>` fails outright (not a soft degrade):
+  - fiona            # s1reader/utils/plot_bursts.py:5  (re-raising try block)
+  - geopandas        # s1reader/utils/plot_bursts.py:6  (same block)
+  - s1etad           # s1reader/s1_etad.py:12 -- S1 ETAD corrections
+  # Function-level / optional, but cheap and worth having:
+  - boto3            # nisar/workflows/stage_dem.py + stage_watermask.py AWS
+                     # pre-flight check; also NISAR S3 direct access
+  - dem_stitcher     # NISAR GUNW DEM staging (course 3.3)
+  #
+  # NOT included, deliberately:
+  #   raider-base  -- isce3's own environment.yml lists it, but it is a
+  #                   FUNCTION-level import in nisar/workflows/troposphere.py
+  #                   and compass/utils/lut.py, used only when the runconfig
+  #                   picks `package: raider` (the pyaps3 branch works without
+  #                   it). Installing it drags in dask + scikit-learn and
+  #                   DOWNGRADES jupyterlab 4.6->3.5, ipython 9->8, pandas,
+  #                   jsonschema 4->3. Put it in a throwaway env if needed.
+  #   capella-reader -- add when doing Capella work (conda-forge, 0.2.2).
+  #   isce2 / isce   -- lives in isce2_env. Never co-install: it pins
+  #                     libgdal-core <3.11 and drags isce3 back to 0.24.4.
+
   # --- notebooks ---
   - jupyterlab
   - ipykernel
