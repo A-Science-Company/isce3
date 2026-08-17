@@ -1,0 +1,174 @@
+# =====================================================================
+# Track G (GSLC) run configuration -- Venezuela, track 162, frame 007
+# =====================================================================
+# Ready to run against the two real NISAR L1 RSLC granules on disk.
+#
+#   python run_track_g.py --config configs/venezuela_t162_asc.yaml --list-steps
+#   python run_track_g.py --config configs/venezuela_t162_asc.yaml --only ingest
+#
+# Measured properties of this pair (do not edit; recorded for context):
+#   ASCENDING, lookDirection = Left, track 162, frame 7, 12-day repeat
+#   reference 20260613 (cycle 022) / secondary 20260625 (cycle 023)
+#   freq A  54720 x 52649   slant spacing  3.1228 m   40 MHz
+#   freq B  54720 x  6582   slant spacing 24.9827 m    5 MHz
+#   azimuth ground spacing 4.456 m   incidence 33.22 / 41.38 / 47.39 deg
+#   ground range spacing   A: 5.699 / 4.725 / 4.243 m
+#                          B: 45.595 / 37.793 / 33.945 m
+#   pols HH + HV on both frequencies;  lambda 0.241963 m
+# ---------------------------------------------------------------------
+
+case_name: venezuela_t162_asc
+case_dir: /home/sharath/Desktop/work/isce3/case_studies/venezuela_t162_asc
+
+# out_root: null  ->  write products alongside the granules, in case_dir:
+#   stack.json  cfg/  L2_GSLC/  aux/dem/  qa/  logs/  provenance/  scratch/
+out_root: null
+
+# Empty -> auto-discover NISAR_L1_*RSLC*.h5 in case_dir and sort by acquisition
+# date (earliest becomes the reference). List paths explicitly to pin the stack.
+granules: []
+
+# ---------------------------------------------------------------------
+# What to process
+# ---------------------------------------------------------------------
+# FREQUENCY B FIRST. It is the same swath and the same azimuth sampling as
+# freq A but 8x fewer range samples (6582 vs 52649), so it exercises the entire
+# pipeline end to end at roughly 1/8 the cost. Switch to [A] -- or [A, B] -- once
+# the workflow is trusted. Note freq A at 5 m posting is a ~29 GB/pol output.
+frequencies: [B]
+
+# HH only to start. HV is present in both granules and both frequencies; adding
+# it here doubles output size and geocoding time.
+polarizations: [HH]
+
+# ---------------------------------------------------------------------
+# The PINNED output geogrid -- shared by every date
+# ---------------------------------------------------------------------
+# This is the single highest-risk parameter block in the whole workflow.
+# Leaving a posting blank makes ISCE3 inherit the DEM's ~30 m spacing for a
+# COMPLEX SLC, which irreversibly decimates it. The config layer rejects that.
+geogrid:
+  # null -> derive UTM/polar zone from the AOI centroid via
+  # nisar.workflows.dumpconfig.point_to_epsg. For this AOI that yields 32619
+  # (UTM zone 19N). Pin it explicitly if you ever want to force a zone.
+  epsg: null
+
+  # Corners are snapped OUTWARD to a multiple of this many metres by stage A,
+  # then written as absolute top_left/bottom_right into every runconfig.
+  # 1000 m divides evenly by 5, 8, 10, 20, 25, 40 and 50, so freq A and freq B
+  # grids nest exactly and the corner coordinates stay readable.
+  snap: 1000.0
+
+  # Extra padding beyond the footprint union, in metres, applied before snapping.
+  margin_m: 0.0
+
+  # Output pixel spacing in metres, per frequency. Positive; ISCE3 applies the
+  # sign for the northing axis itself.
+  posting:
+    # Freq A: near-isotropic native ground resolution (~4.2-5.7 m range,
+    # ~4.46 m azimuth), so 5 m square is the natural choice.
+    A: {x: 5.0, y: 5.0}
+
+    # Freq B is deliberately ANISOTROPIC. Range bandwidth is only 5 MHz, giving
+    # ~34-46 m ground range, while azimuth is unchanged at ~4.46 m. For this
+    # near-polar ascending pass the range direction lies close to easting and
+    # azimuth close to northing, so the resolution cell's bounding box is about
+    # 40 m in x and 13 m in y. Posting 40 x 5 m therefore samples the complex
+    # signal without aliasing it. Going to y: 10.0 halves the output (1.8 GB
+    # instead of 3.3 GB per pol) and still clears Nyquist, but with far less
+    # headroom -- change it only deliberately.
+    B: {x: 40.0, y: 5.0}
+
+  # Geometry cubes (incidence, LOS, ...) written into the product metadata.
+  # Coarse on purpose: these are smooth fields, unrelated to image posting.
+  radar_grid_cube:
+    posting: 1000.0
+    heights: [-500.0, 0.0, 500.0, 1000.0, 1500.0, 2000.0, 3000.0]
+
+# ---------------------------------------------------------------------
+# DEM staging (stage B)
+# ---------------------------------------------------------------------
+dem:
+  # NISAR: native WGS84 ELLIPSOIDAL heights, which is what ISCE3 geocoding
+  # requires. Hard precondition: a free NASA Earthdata account with an entry
+  # for urs.earthdata.nasa.gov in ~/.netrc. sardem enforces this before any
+  # network call, so a missing credential fails instantly rather than midway.
+  source: NISAR
+
+  # Copernicus GLO-30 fallback. Delivered as EGM2008 and converted to WGS84 by
+  # sardem, so it is also ellipsoidal -- but ocean arrives as nodata == 0 by
+  # design on this route, so ocean == 0 there is NOT a datum bug.
+  fallback: COP
+
+  # null -> <out_root>/aux/dem/dem_<case_name>.tif
+  path: null
+
+  # Degrees of padding around the AOI (which already includes the snapped UTM
+  # box, not just the footprint). ~0.1 deg is about 11 km -- comfortably more
+  # than the 1 km snap, and enough slack for terrain-induced geolocation shift.
+  buffer_deg: 0.1
+
+  # null -> sardem's own cache location
+  cache_dir: null
+
+# ---------------------------------------------------------------------
+# GSLC generation (stage G1). Keys map 1:1 onto the installed gslc schema.
+# ---------------------------------------------------------------------
+gslc:
+  # MUST stay true. Flattening strips the range carrier phase; leaving it in is
+  # irreversible downstream and every interferogram would carry a huge ramp.
+  # The config layer refuses to run with this set false.
+  flatten: true
+
+  # Geolocation-only for GSLC, but it differs between the two dates, so leaving
+  # it on removes a few-cm relative bias.
+  solid_earth_tides: true
+
+  data_type: complex64_zero_mantissa
+  compression_enabled: true
+  compression_level: 1          # 1 = fastest; these rasters are large
+  chunk_size: [512, 512]
+  shuffle: true
+  fs_strategy: page
+  fs_page_size: 4194304
+
+  # Geocoding block size in output pixels. 1024 x 1024 complex64 is 8 MiB per
+  # block, which is comfortable against ~4 GB free RAM.
+  blocksize: {x: 1024, y: 1024}
+
+  geo2rdr: {threshold: 1.0e-8, maxiter: 25}
+
+  # No CUDA device on this machine.
+  gpu_enabled: false
+
+  # Keep ISCE3 from attempting its own DEM download; stage B owns the DEM.
+  internet_access: false
+
+  debug_switch: false
+
+  # Optional per-date ancillary overrides, keyed by YYYYMMDD. Left empty, the
+  # orbit and TEC embedded in the RSLC are used.
+  #   orbit_files: {"20260613": /path/to/orbit.xml}
+  #   tec_files:   {"20260613": /path/to/tec.json}
+  orbit_files: {}
+  tec_files: {}
+
+# ---------------------------------------------------------------------
+# QA (decimated reads only -- never loads a full raster)
+# ---------------------------------------------------------------------
+qa:
+  enabled: true
+  max_pixels: 2000              # target long edge of each overview
+  max_read_bytes: 268435456     # 256 MiB cap on any single block read
+  dpi: 110
+  rslc_quicklook: true          # also quicklook the input RSLCs in radar coords
+
+# ---------------------------------------------------------------------
+# Stage toggles. The CLI's --only / --start-step / --stop-step layer on top.
+# ---------------------------------------------------------------------
+steps:
+  ingest: true
+  dem: true
+  gslc: true
+  gridgate: true
+  qa: true
