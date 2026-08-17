@@ -164,6 +164,166 @@ qa:
   rslc_quicklook: true          # also quicklook the input RSLCs in radar coords
 
 # ---------------------------------------------------------------------
+# Interferogram (stage G3) -- conjugate product, coherence, per-date amplitude
+# ---------------------------------------------------------------------
+# Runs BEFORE watermask: the mask is built on this stage's grid so it is
+# pixel-aligned by construction.
+igram:
+  enabled: true
+
+  # null -> first entry of `frequencies` / `polarizations` above.
+  # THE POLARIZATION IS HH AND THAT IS ALL THERE IS. The granules are DHDH
+  # (HH + HV) and the L2 GSLCs carry HH only -- there is no VV anywhere in this
+  # product. Where a VV amplitude is wanted, HH is the correct co-pol
+  # substitute, and every label downstream says HH rather than VV.
+  freq: null
+  pol: null
+
+  # Block-average factors in ROWS and COLUMNS of the GSLC grid (not radar
+  # range/azimuth). The freq-B posting is 40 x 5 m, so 16 rows x 2 cols gives
+  # square 80 x 80 m output pixels: 59800 x 7575 -> 3737 x 3787.
+  looks_y: 16
+  looks_x: 2
+
+  # Streaming block height in GSLC rows. Multiple of BOTH looks_y (16) and the
+  # 512-row HDF5 chunking, so look boxes never straddle a block boundary and
+  # gzip never re-inflates the same chunk twice. ~350 MB peak.
+  block_rows: 1024
+
+  # Each date's own multilooked amplitude, on the same grid. The pair's .amp
+  # band is the GEOMETRIC MEAN of the two dates and cannot show per-date
+  # backscatter, which is what the overlay needs.
+  per_date_amplitude: true
+
+  # Empty -> every consecutive date pair (here: one, 20260613 x 20260625).
+  pairs: []
+
+  pair_dir_template: "pairs/{ref}_{sec}/trackG"
+  prefix_template: "ifg_{freq}_{pol}"
+
+# ---------------------------------------------------------------------
+# Water mask -- substitute for the course's NASADEM bit-15 route, which is
+# broken upstream (SRTMSWBD 404s; sardem substitutes zeros and exits 0).
+#
+# The threshold is applied to ORTHOMETRIC height. Our DEM is WGS84 ellipsoidal
+# and local sea level is about -28 m ellipsoidal here, so the course's `h <= 0`
+# used unchanged would drown 1,591 km2 of real coastal land. See watermask.py.
+# ---------------------------------------------------------------------
+watermask:
+  enabled: true
+  method: dem_orthometric
+  # Built on the interferogram grid, so it is pixel-aligned by construction.
+  reference_raster: pairs/20260613_20260625/trackG/ifg_B_HH.amp.tif
+  geoid_crs: EPSG:9518          # WGS84 + EGM2008 height
+  sea_level_margin_m: 1.0       # H <= this is water; flat plateau over 0.25-3 m
+  include_inland: false         # true also catches Lake Valencia (dark + elevated)
+  # A box of open Caribbean, in the grid CRS (EPSG:32619). The stage asserts
+  # this comes out >95% water -- the check the broken NASADEM route would fail.
+  # Keep it well inside the swath: the swath is a rotated parallelogram in a
+  # north-up bounding box, so boxes near the NE corner are mostly nodata.
+  ocean_probe: [600000.0, 1200000.0, 680000.0, 1260000.0]
+  min_water_fraction: 0.01
+  max_water_fraction: 0.95
+
+# ---------------------------------------------------------------------
+# Unwrapping (stage G4) -- a faithful port of the course chain, in its order:
+#   Goldstein filter -> phase-sigma coherence -> water mask -> zero the
+#   interferogram at invalid -> snaphu -> zero unw and conncomp at invalid
+#
+# The correlation fed to SNAPHU is the PHASE-SIGMA coherence computed from the
+# FILTERED interferogram -- NOT the boxcar coherence in ifg_B_HH.coh.tif, which
+# is the display/QA product. Both course drivers pass filt_mli.phsig.coh.tif.
+# ---------------------------------------------------------------------
+unwrap:
+  enabled: true
+
+  # Goldstein. Both are the ISCE2 topsApp defaults and the course never changes
+  # them. alpha is the exponent in H = |S|**alpha; psize is the FFT patch, with
+  # 50% overlap and a triangular taper applied after the inverse FFT.
+  filter_alpha: 0.5
+  filter_psize: 32
+
+  # Phase-sigma window sizes. The course does not even expose these from its
+  # wrapper -- they are always 5 / 5.
+  phsig_win: 5
+  phsig_grad_win: 5
+
+  # Course value is 500. Raising it is a pure speed/memory change with NO
+  # numerical effect: same iteration order, same arithmetic, ~1 MB per batch.
+  phsig_batch: 5000
+
+  # THE ASYMMETRY THAT SILENTLY BREAKS A PORT OF THIS CHAIN.
+  #   phsig  gets the NOMINAL looks           = looks_y * looks_x     = 32
+  #   snaphu gets the EFFECTIVE looks         = 32 / 1.2^2            = 22.22
+  # null derives the nominal count from igram.looks_y * igram.looks_x so the two
+  # cannot drift apart. In the course's 4 x 2 setup these are 8 and 5.56, and
+  # its phsig helper's DEFAULT nlks is also 8 -- so copying its bare call here
+  # would silently pass 8 instead of 32 and badly overestimate coherence.
+  nlooks_nominal: null
+  # 1.2 per dimension (1.44 total) is the ISCE2 convention for nominal -> ENL.
+  # It is not derived for a geocoded GSLC geometry, but it errs conservative and
+  # it agrees with the measured coherence floor: sqrt(pi)/(2*sqrt(22)) = 0.189,
+  # which is where open water sits in this scene.
+  oversample_factor: 1.2
+
+  cost: smooth
+  init: mcf
+
+  # SINGLE TILE, SINGLE PROCESS -- the course's settings. Nothing about tiling
+  # or parallelism is configured anywhere in the course. [4, 4] with nproc 8 is
+  # far faster and lighter on this 14.2 Mpx grid, but per-tile reoptimisation
+  # changes the solution and the connected-component labelling: a scientific
+  # change, not a performance flag. The config layer warns if you change it.
+  ntiles: [1, 1]
+  tile_overlap: 0
+  nproc: 1
+  single_tile_reoptimize: true
+
+  # Applied by ZEROING the interferogram, not via snaphu's mask= argument --
+  # that is what the course does, and switching changes conncomp labelling.
+  water_mask: true
+  # Refuse to unwrap if the mask covers more than this fraction of the swath.
+  # An all-water mask is the exact signature of the broken NASADEM producer,
+  # which pre-fills its mosaic with WATER and exits 0 when every tile 404s.
+  # Measured here: 47.2% water, so 0.60 leaves real headroom.
+  water_max_fraction: 0.60
+
+  # null -> snaphu's own temp dir. Point at the case scratch/ if /tmp is small.
+  scratchdir: null
+
+# ---------------------------------------------------------------------
+# Overlay (stage G5) -- folium HTML over Google Satellite tiles
+# ---------------------------------------------------------------------
+overlay:
+  enabled: true
+  opacity: 0.85
+
+  # 1 = full resolution, sidecar PNGs (~39 MB total, layers load on demand).
+  # 2 = 160 m pixels, which is what makes `embed: true` reasonable.
+  decimate: 1
+
+  # false -> write PNGs beside the HTML and link them, so only the visible
+  # layer is fetched. true -> a single portable file, ~4/3 the PNG bytes,
+  # parsed on every load regardless of which layers are on.
+  embed: false
+
+  zoom_start: 9
+  basemap_url: "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
+  basemap_attr: "Google Satellite"
+  max_zoom: 20
+
+  # Amplitude is stretched over a scale POOLED across both dates, otherwise the
+  # two are not comparable. Coherence and wrapped phase are never stretched.
+  amplitude_percentiles: [2.0, 98.0]
+  unwrap_percentiles: [2.0, 98.0]
+
+  # Also show the phase-sigma coherence -- the correlation SNAPHU actually saw,
+  # which is not the same raster as the displayed boxcar coherence.
+  include_phsig: true
+
+  html_name: trackG_overlay.html
+
+# ---------------------------------------------------------------------
 # Stage toggles. The CLI's --only / --start-step / --stop-step layer on top.
 # ---------------------------------------------------------------------
 steps:
@@ -172,3 +332,7 @@ steps:
   gslc: true
   gridgate: true
   qa: true
+  igram: true
+  watermask: true
+  unwrap: true
+  overlay: true

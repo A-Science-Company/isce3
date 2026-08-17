@@ -8,11 +8,18 @@ Stages implemented here
   G1  gslc      : render + validate a gslc runconfig per date, run nisar.workflows.gslc
   G2  gridgate  : hard assert the two GSLCs are pixel-aligned
   QA  qa        : decimated-read quicklooks (never loads a full raster)
+  G3  igram     : conjugate product + coherence + per-date amplitude, one pass
+  W   watermask : water mask from the DEM in ORTHOMETRIC height
+  G4  unwrap    : Goldstein -> phase-sigma coherence -> water mask -> SNAPHU
+  G5  overlay   : folium HTML, every raster a layer over satellite tiles
 
 Stages deliberately NOT implemented yet (see README "Slotting in the rest"):
-  G3  ifg       : conjugate product + coherence from two GSLCs
-      unwrap    : phase unwrapping
-      dolphin    : phase linking / time series
+      dolphin   : phase linking / time series over an N-date stack
+
+A note that belongs at the top of this package: THIS PRODUCT HAS NO VV. The
+granules are DHDH (HH + HV) and the L2 GSLCs carry HH only. Where a VV amplitude
+is called for, HH is the correct co-pol substitute -- and it is labelled HH
+everywhere, never VV.
 
 Every stage is independently runnable, idempotent, and writes a JSON provenance
 sidecar next to its outputs. `stack.json` is the single source of truth that all
@@ -29,5 +36,9 @@ __all__ = [
     "gslc",
     "gridgate",
     "qa",
+    "igram",
+    "watermask",
+    "unwrap",
+    "overlay",
     "util",
 ]

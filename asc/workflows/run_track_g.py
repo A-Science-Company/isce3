@@ -38,8 +38,12 @@ if str(HERE) not in sys.path:
 from nisar_wf import dem as dem_stage  # noqa: E402
 from nisar_wf import gridgate as gridgate_stage  # noqa: E402
 from nisar_wf import gslc as gslc_stage  # noqa: E402
+from nisar_wf import igram as igram_stage  # noqa: E402
 from nisar_wf import ingest as ingest_stage  # noqa: E402
+from nisar_wf import overlay as overlay_stage  # noqa: E402
 from nisar_wf import qa as qa_stage  # noqa: E402
+from nisar_wf import unwrap as unwrap_stage  # noqa: E402
+from nisar_wf import watermask as watermask_stage  # noqa: E402
 from nisar_wf.config import Config, ConfigError  # noqa: E402
 from nisar_wf.util import (  # noqa: E402
     Logger,
@@ -85,6 +89,18 @@ STEPS: list[Step] = [
          gridgate_stage.run, "gridgate"),
     Step(5, "qa", "QA", "decimated-read quicklooks (never loads a full raster)",
          qa_stage.run, "qa"),
+    # NOTE: igram is deliberately ahead of watermask. The water mask is built on
+    # an existing product's grid so it is pixel-aligned by construction, and the
+    # interferogram is that product -- on a fresh case, watermask first would
+    # have nothing to build on.
+    Step(6, "igram", "G3", "interferogram + coherence + per-date amplitude",
+         igram_stage.run, "igram"),
+    Step(7, "watermask", "W", "water mask via orthometric DEM (NASADEM route is broken)",
+         watermask_stage.run, "watermask"),
+    Step(8, "unwrap", "G4", "Goldstein filter -> phase-sigma coh -> water mask -> SNAPHU",
+         unwrap_stage.run, "unwrap"),
+    Step(9, "overlay", "G5", "folium HTML: amplitude/phase/coherence over satellite tiles",
+         overlay_stage.run, "overlay"),
 ]
 
 
@@ -415,13 +431,24 @@ def main(argv: list[str] | None = None) -> int:
 
 def _next_steps(cfg: Config, log: Logger, ran: list[str]) -> None:
     """Close the loop the way 0_params_setup.py does: print the literal next command."""
-    if "gridgate" in ran:
+    if "overlay" in ran:
         log.info("")
-        log.info("  The GSLC stack is verified pixel-aligned. Next stages are not yet")
-        log.info("  implemented (see README 'Slotting in the rest'):")
-        log.info("    G3      interferogram + coherence from the aligned pair")
-        log.info("    unwrap  phase unwrapping")
-        log.info("    dolphin phase linking / time series")
+        log.info("  Open the overlay in a browser. Every amplitude layer is HH (co-pol) --")
+        log.info("  this product is HH-only at L2, there is no VV. Remaining stage:")
+        log.info("    dolphin  phase linking / time series over an N-date stack")
+    elif "unwrap" in ran:
+        log.info("")
+        log.info("  Next:")
+        log.info(f"    python {Path(__file__).name} --config {cfg.config_path} --only overlay")
+    elif "igram" in ran:
+        log.info("")
+        log.info("  Next:")
+        log.info(f"    python {Path(__file__).name} --config {cfg.config_path} "
+                 f"--only watermask unwrap overlay")
+    elif "gridgate" in ran:
+        log.info("")
+        log.info("  The GSLC stack is verified pixel-aligned. Next:")
+        log.info(f"    python {Path(__file__).name} --config {cfg.config_path} --only igram")
     elif "gslc" in ran:
         log.info("")
         log.info("  Next:")

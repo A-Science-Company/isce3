@@ -277,6 +277,284 @@ class QaConfig:
 
 
 @dataclass
+class WaterMaskConfig:
+    """
+    Water mask, replacing the course's broken NASADEM bit-15 route.
+
+    `sea_level_margin_m` is applied to ORTHOMETRIC height, so the DEM is
+    converted from its native WGS84 ellipsoidal datum via `geoid_crs` first.
+    Thresholding our ellipsoidal DEM at 0 m the way the course does would mask
+    every coastal pixel below ~30 m -- 1,591 km2 of real land on this scene.
+
+    The margin is +1 m rather than 0 m because the DEM's ocean fill lands
+    exactly on H = 0 with sub-metre scatter; at 0 m the test splits the ocean
+    population in half (49.7% of deep water captured), while anywhere in
+    0.25-3 m sits on a flat plateau at ~98.2%. See watermask.py.
+    """
+
+    enabled: bool = True
+    method: str = "dem_orthometric"          # or "amplitude"
+    reference_raster: str | None = None      # grid to build on; relative to out_root
+    geoid_crs: str = "EPSG:9518"             # WGS84 + EGM2008 height
+    sea_level_margin_m: float = 1.0
+    amplitude_db: float | None = None        # 20*log10(magnitude), NOT 10*log10
+    amplitude_percentile: float | None = None
+    include_inland: bool = False
+    inland_db: float = -14.0
+    inland_min_elev_m: float = 5.0
+    inland_min_area_px: int = 400
+    ocean_probe: list[float] | None = None   # [x0, y0, x1, y1] in the grid CRS
+    min_water_fraction: float = 0.001
+    max_water_fraction: float = 0.999
+    block_rows: int = 512
+
+    def validate(self) -> list[str]:
+        warnings: list[str] = []
+        if self.method not in ("dem_orthometric", "amplitude"):
+            raise ConfigError(
+                f"watermask.method '{self.method}' invalid; "
+                "choose 'dem_orthometric' or 'amplitude'"
+            )
+        if self.method == "amplitude" and self.amplitude_db is None \
+                and self.amplitude_percentile is None:
+            raise ConfigError(
+                "watermask.method 'amplitude' needs amplitude_db or amplitude_percentile"
+            )
+        if self.amplitude_db is not None and self.amplitude_db > -8.0:
+            warnings.append(
+                f"watermask.amplitude_db {self.amplitude_db} is suspiciously close to 0. "
+                f"This field is TRUE dB = 20*log10(magnitude). A sea/land split on this "
+                f"scene sits near -13 dB, so a value around -6.5 is the signature of a "
+                f"10*log10 convention applied to a magnitude raster, which halves every "
+                f"dB value -- double it. (The -6.48 dB figure quoted for this case is "
+                f"exactly that: its true-dB equivalent is -12.96 dB.)"
+            )
+        if not (-5.0 <= self.sea_level_margin_m <= 50.0):
+            raise ConfigError(
+                f"watermask.sea_level_margin_m {self.sea_level_margin_m} outside a sane "
+                f"-5..50 m range"
+            )
+        if self.sea_level_margin_m < 0.25:
+            warnings.append(
+                f"watermask.sea_level_margin_m {self.sea_level_margin_m} sits on the "
+                f"ocean-fill ridge at H=0; measured capture of deep water there is only "
+                f"~50%. Use 0.25-3 m."
+            )
+        if self.ocean_probe is not None and len(self.ocean_probe) != 4:
+            raise ConfigError("watermask.ocean_probe must be [x0, y0, x1, y1]")
+        return warnings
+
+
+@dataclass
+class IgramConfig:
+    """
+    Stage G3 -- interferogram, coherence, per-date amplitude.
+
+    `looks_y` / `looks_x` are block-average factors in ROWS and COLUMNS of the
+    GSLC grid, not in radar range/azimuth. On the freq-B 40 x 5 m posting,
+    16 x 2 gives square 80 x 80 m output pixels.
+
+    `block_rows` should stay a multiple of BOTH `looks_y` and the HDF5 chunk row
+    size (512 for these products). A block that straddles a chunk boundary makes
+    gzip re-inflate the same chunk twice.
+    """
+
+    enabled: bool = True
+    freq: str | None = None                  # None -> frequencies[0]
+    pol: str | None = None                   # None -> polarizations[0]
+    looks_y: int = 16
+    looks_x: int = 2
+    block_rows: int = 1024
+    per_date_amplitude: bool = True
+    pairs: list[list[str]] = field(default_factory=list)
+    pair_dir_template: str = "pairs/{ref}_{sec}/trackG"
+    prefix_template: str = "ifg_{freq}_{pol}"
+
+    def validate(self, frequencies: list[str], polarizations: list[str]) -> list[str]:
+        warnings: list[str] = []
+        if self.freq is not None and self.freq not in VALID_FREQUENCIES:
+            raise ConfigError(f"igram.freq '{self.freq}' invalid; choose from {VALID_FREQUENCIES}")
+        if self.freq is not None and self.freq not in frequencies:
+            raise ConfigError(
+                f"igram.freq '{self.freq}' is not in `frequencies` {frequencies}; "
+                f"no GSLC would exist for it"
+            )
+        if self.pol is not None and self.pol not in VALID_POLS:
+            raise ConfigError(f"igram.pol '{self.pol}' invalid; choose from {VALID_POLS}")
+        if self.pol is not None and self.pol not in polarizations:
+            raise ConfigError(
+                f"igram.pol '{self.pol}' is not in `polarizations` {polarizations}; "
+                f"geocode was never asked to produce it"
+            )
+        for name in ("looks_y", "looks_x"):
+            v = int(getattr(self, name))
+            if v < 1:
+                raise ConfigError(f"igram.{name} must be >= 1 (got {v})")
+        if self.block_rows < self.looks_y:
+            raise ConfigError(
+                f"igram.block_rows ({self.block_rows}) is smaller than looks_y "
+                f"({self.looks_y}); no complete look box would fit in a block"
+            )
+        if self.block_rows % self.looks_y:
+            warnings.append(
+                f"igram.block_rows ({self.block_rows}) is not a multiple of looks_y "
+                f"({self.looks_y}); it will be rounded down to "
+                f"{(self.block_rows // self.looks_y) * self.looks_y} so look boxes stay "
+                f"aligned to block boundaries"
+            )
+        if self.block_rows % 512:
+            warnings.append(
+                f"igram.block_rows ({self.block_rows}) is not a multiple of the 512-row "
+                f"HDF5 chunking; every block will straddle a chunk boundary and gzip will "
+                f"re-inflate the same chunk twice"
+            )
+        return warnings
+
+
+@dataclass
+class UnwrapConfig:
+    """
+    Stage G4 -- Goldstein filter, phase-sigma coherence, water mask, SNAPHU.
+
+    THE nlooks ASYMMETRY. Two different quantities, fed differently, and this is
+    where a port of the course silently goes wrong:
+
+        phsig  gets the NOMINAL look count       nlks   = looks_y * looks_x
+        snaphu gets the EFFECTIVE look count     nlooks = nominal / oversample^2
+
+    In the course's 4 x 2 configuration those are 8 and 5.56 -- and the course's
+    `generate_phsig_coh_tif` DEFAULT nlks is also 8, so its stack notebook can
+    omit the argument and still be correct by coincidence. At 16 x 2 = 32 looks
+    the coincidence breaks. `nlooks_nominal: null` derives the nominal count from
+    `igram.looks_y * igram.looks_x` so the two cannot drift apart.
+
+    `oversample_factor` 1.2 is the ISCE2 convention (1.2 per dimension, 1.44
+    total) for turning nominal looks into independent looks. It is not derived
+    for a geocoded GSLC geometry -- see unwrap.py -- but it errs conservative and
+    it agrees with the measured coherence floor here.
+    """
+
+    enabled: bool = True
+    filter_alpha: float = 0.5                # course default, never changed there
+    filter_psize: int = 32                   # course default
+    phsig_win: int = 5
+    phsig_grad_win: int = 5
+    phsig_batch: int = 5000                  # course 500; pure speed, no numerics
+    nlooks_nominal: int | None = None        # None -> looks_y * looks_x
+    oversample_factor: float = 1.2
+    cost: str = "smooth"
+    init: str = "mcf"
+    ntiles: list[int] = field(default_factory=lambda: [1, 1])
+    tile_overlap: int = 0
+    nproc: int = 1
+    single_tile_reoptimize: bool = True
+    water_mask: bool = True
+    water_max_fraction: float = 0.60
+    scratchdir: str | None = None
+
+    def validate(self) -> list[str]:
+        warnings: list[str] = []
+        if not (0.0 <= self.filter_alpha <= 1.0):
+            raise ConfigError(
+                f"unwrap.filter_alpha {self.filter_alpha} outside [0, 1]; it is the "
+                f"exponent in H = |S|**alpha"
+            )
+        if self.filter_psize < 4 or (self.filter_psize & (self.filter_psize - 1)):
+            raise ConfigError(
+                f"unwrap.filter_psize {self.filter_psize} must be a power of two >= 4 "
+                f"(the filter takes an FFT of each patch)"
+            )
+        for name in ("phsig_win", "phsig_grad_win"):
+            v = int(getattr(self, name))
+            if v < 3:
+                raise ConfigError(f"unwrap.{name} must be >= 3 (got {v})")
+            if v % 2 == 0:
+                warnings.append(
+                    f"unwrap.{name} {v} is even; it will be incremented to {v + 1} "
+                    f"(the window must be centred on a pixel)"
+                )
+        if self.phsig_batch < 1:
+            raise ConfigError("unwrap.phsig_batch must be >= 1")
+        if self.cost not in ("smooth", "defo", "topo", "p-norm"):
+            raise ConfigError(
+                f"unwrap.cost '{self.cost}' invalid; snaphu accepts "
+                f"'smooth' / 'defo' / 'topo' / 'p-norm' (the course uses 'smooth')"
+            )
+        if self.init not in ("mcf", "mst"):
+            raise ConfigError(f"unwrap.init '{self.init}' invalid; choose 'mcf' or 'mst'")
+        if self.oversample_factor < 1.0:
+            raise ConfigError(
+                f"unwrap.oversample_factor {self.oversample_factor} is below 1.0, which "
+                f"would claim MORE independent looks than samples averaged"
+            )
+        if len(self.ntiles) != 2 or any(int(t) < 1 for t in self.ntiles):
+            raise ConfigError("unwrap.ntiles must be two integers >= 1")
+        if list(self.ntiles) != [1, 1]:
+            warnings.append(
+                f"unwrap.ntiles {list(self.ntiles)} DIVERGES from the course, which "
+                f"unwraps single-tile. Tiling is much faster and lighter, but per-tile "
+                f"reoptimisation changes the solution and the connected-component "
+                f"labelling -- it is a scientific change, not a performance flag."
+            )
+        if self.nproc < 1:
+            raise ConfigError("unwrap.nproc must be >= 1")
+        if not (0.0 < self.water_max_fraction <= 1.0):
+            raise ConfigError("unwrap.water_max_fraction must be in (0, 1]")
+        if self.water_max_fraction > 0.9:
+            warnings.append(
+                f"unwrap.water_max_fraction {self.water_max_fraction} is high enough to "
+                f"admit a near-all-water mask, which is the exact signature of the broken "
+                f"NASADEM producer (it pre-fills with WATER and exits 0 when tiles 404)"
+            )
+        return warnings
+
+
+@dataclass
+class OverlayConfig:
+    """
+    Stage G5 -- the folium HTML.
+
+    `embed: true` inlines every PNG as a base64 data URI for a single portable
+    file. That costs ~4/3 the PNG bytes AND is parsed on every page load
+    regardless of which layers are switched on, so it is only reasonable
+    together with `decimate: 2`.
+    """
+
+    enabled: bool = True
+    opacity: float = 0.85
+    decimate: int = 1
+    embed: bool = False
+    zoom_start: int = 9
+    basemap_url: str = "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
+    basemap_attr: str = "Google Satellite"
+    max_zoom: int = 20
+    amplitude_percentiles: list[float] = field(default_factory=lambda: [2.0, 98.0])
+    unwrap_percentiles: list[float] = field(default_factory=lambda: [2.0, 98.0])
+    include_phsig: bool = True
+    html_name: str = "trackG_overlay.html"
+
+    def validate(self) -> list[str]:
+        warnings: list[str] = []
+        if not (0.0 < self.opacity <= 1.0):
+            raise ConfigError(f"overlay.opacity must be in (0, 1] (got {self.opacity})")
+        if self.decimate < 1:
+            raise ConfigError(f"overlay.decimate must be >= 1 (got {self.decimate})")
+        for name in ("amplitude_percentiles", "unwrap_percentiles"):
+            v = list(getattr(self, name))
+            if len(v) != 2 or not (0 <= v[0] < v[1] <= 100):
+                raise ConfigError(f"overlay.{name} must be [lo, hi] with 0 <= lo < hi <= 100")
+        if not self.html_name.endswith(".html"):
+            raise ConfigError("overlay.html_name must end in .html")
+        if self.embed and self.decimate == 1:
+            warnings.append(
+                "overlay.embed is true at full resolution: the HTML will carry ~50 MB of "
+                "base64, parsed on every load whether or not a layer is visible. Set "
+                "overlay.decimate: 2, or leave embed false and ship the _layers/ directory."
+            )
+        return warnings
+
+
+@dataclass
 class StepToggles:
     """Per-stage on/off. The CLI's --only/--start-step/--stop-step layer on top."""
 
@@ -285,6 +563,10 @@ class StepToggles:
     gslc: bool = True
     gridgate: bool = True
     qa: bool = True
+    igram: bool = True
+    watermask: bool = True
+    unwrap: bool = True
+    overlay: bool = True
 
 
 # --------------------------------------------------------------------------
@@ -302,6 +584,10 @@ class Config:
     dem: DemConfig = field(default_factory=DemConfig)
     gslc: GslcConfig = field(default_factory=GslcConfig)
     qa: QaConfig = field(default_factory=QaConfig)
+    igram: IgramConfig = field(default_factory=IgramConfig)
+    watermask: WaterMaskConfig = field(default_factory=WaterMaskConfig)
+    unwrap: UnwrapConfig = field(default_factory=UnwrapConfig)
+    overlay: OverlayConfig = field(default_factory=OverlayConfig)
     steps: StepToggles = field(default_factory=StepToggles)
 
     # populated by from_yaml
@@ -364,6 +650,23 @@ class Config:
         return self.gslc_dir / f"{date}_gslc_freq{freq_tag}.h5"
 
     @property
+    def igram_freq(self) -> str:
+        """Frequency the interferometric stages work on. Defaults to the first selected."""
+        return self.igram.freq or self.frequencies[0]
+
+    @property
+    def igram_pol(self) -> str:
+        """
+        Polarization the interferometric stages work on.
+
+        Defaults to the first selected. For this data set that is HH, and HH is
+        all there is: the granules are DHDH (HH + HV) and the L2 GSLCs carry HH
+        only. THERE IS NO VV -- where a VV product is asked for, HH is the
+        correct co-pol substitute and must be labelled as HH, not as VV.
+        """
+        return self.igram.pol or self.polarizations[0]
+
+    @property
     def freq_tag(self) -> str:
         return "".join(sorted(self.frequencies))
 
@@ -420,6 +723,10 @@ class Config:
         warnings += self.dem.validate()
         warnings += self.gslc.validate()
         self.qa.validate()
+        warnings += self.igram.validate(self.frequencies, self.polarizations)
+        warnings += self.watermask.validate()
+        warnings += self.unwrap.validate()
+        warnings += self.overlay.validate()
 
         # cheap disk sanity: a GSLC is big and running out of space mid-geocode
         # wastes hours
@@ -509,6 +816,10 @@ _NESTED = {
     "DemConfig": DemConfig,
     "GslcConfig": GslcConfig,
     "QaConfig": QaConfig,
+    "IgramConfig": IgramConfig,
+    "WaterMaskConfig": WaterMaskConfig,
+    "UnwrapConfig": UnwrapConfig,
+    "OverlayConfig": OverlayConfig,
     "StepToggles": StepToggles,
     "RadarGridCube": RadarGridCube,
     "Geo2Rdr": Geo2Rdr,
