@@ -411,8 +411,8 @@ def main(argv: list[str] | None = None) -> int:
             log.error(f"  not attempted: {remaining}")
         log.error(
             f"  after fixing, resume with:\n"
-            f"    python {Path(__file__).name} --config {cfg.config_path} "
-            f"--start-step {failed_step.name}"
+            f"    python {Path(__file__).name} --config {cfg.config_path}"
+            f" --start-step {failed_step.name}"
         )
         log.kv("logfile", str(log_path))
         return 1

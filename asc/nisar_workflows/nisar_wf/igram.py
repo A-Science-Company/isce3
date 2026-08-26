@@ -150,7 +150,7 @@ def multilook_grid(x: np.ndarray, y: np.ndarray, ny: int, nx: int, ry: int, rx: 
 
 def form_pair(ref_path: Path, sec_path: Path, freq: str, pol: str,
               ry: int, rx: int, prefix: Path, amp_paths: dict[str, Path],
-              block_rows: int, log: Logger) -> dict:
+              block_rows: int, log: Logger, coherence_window: int = 5) -> dict:
     """
     Stream both GSLCs once and write igram / coh / nlooks / amp + per-date amps.
 
@@ -211,6 +211,14 @@ def form_pair(ref_path: Path, sec_path: Path, freq: str, pol: str,
         est = blk * nx * 8 * 2 + blk * nx * 16
         log.info(f"  streaming {ny} x {nx} in {blk}-row blocks "
                  f"(~{human_bytes(est)} peak per block)")
+        if ry * rx >= _MIN_COH_SAMPLES:
+            log.info(f"  coherence: boxcar over the {ry} x {rx} look box "
+                     f"({ry * rx} samples)")
+        else:
+            log.info(f"  coherence: {coherence_window} x {coherence_window} SLIDING "
+                     f"window ({coherence_window ** 2} samples) -- the {ry} x {rx} "
+                     f"look box is too small to estimate from (a 1-sample box gives "
+                     f"1.0 identically). Phase stays per-pixel; the grid is unchanged.")
 
         t0 = time.time()
         n_blocks = (oy * ry + blk - 1) // blk
@@ -260,7 +268,15 @@ def form_pair(ref_path: Path, sec_path: Path, freq: str, pol: str,
             cnt = blk2(joint.astype(np.float32))
             den = np.sqrt(p1 * p2)
             with np.errstate(invalid="ignore", divide="ignore"):
-                coh = np.where((den > 0) & (cnt > 0), np.abs(num) / den, np.nan)
+                if ry * rx >= _MIN_COH_SAMPLES:
+                    coh = np.where((den > 0) & (cnt > 0), np.abs(num) / den, np.nan)
+                else:
+                    # look box too small to estimate coherence from -- use a
+                    # sliding window at FULL resolution, then decimate onto the
+                    # (here identical) output grid.
+                    cw = _sliding_coherence(a, b, joint, coherence_window)
+                    coh = cw[::ry, ::rx][:m, :n]
+                    coh = np.where(cnt > 0, coh, np.nan)
                 ig = np.where(cnt > 0, num / np.maximum(cnt, 1), np.nan)
                 amp = np.where(cnt > 0, np.sqrt(np.sqrt(p1 * p2) / np.maximum(cnt, 1)), np.nan)
 
@@ -371,6 +387,76 @@ def expected_outputs(cfg: Config, ref: str, sec: str) -> list[Path]:
     return out
 
 
+
+def _stale_against_pin(cfg, want, log) -> str | None:
+    """Return a reason string if existing products do not match the pinned geogrid.
+
+    Compares the first existing raster's origin and pixel size against the
+    stack.json pin scaled by the multilook factors. Returns None when they agree
+    (or when nothing can be read, which is left to the normal missing-file path).
+    """
+    import json
+    from osgeo import gdal
+    gdal.UseExceptions()
+
+    existing = next((f for f in want if f.exists() and str(f).endswith(".tif")), None)
+    if existing is None:
+        return None
+    stack_json = Path(cfg.case) / "stack.json"
+    if not stack_json.exists():
+        return None
+    try:
+        g = json.loads(stack_json.read_text())["geogrid"]
+        freq = cfg.igram_freq
+        post = g["per_frequency"][freq]
+        exp_x = float(post["x_posting"]) * int(cfg.igram.looks_x)
+        exp_y = float(post["y_posting"]) * int(cfg.igram.looks_y)
+        exp_ox = float(g["top_left"]["x_abs"])
+        exp_oy = float(g["top_left"]["y_abs"])
+        ds = gdal.Open(str(existing))
+        gt = ds.GetGeoTransform()
+    except Exception:
+        return None
+
+    bad = []
+    if abs(gt[1] - exp_x) > 1e-6 or abs(abs(gt[5]) - exp_y) > 1e-6:
+        bad.append(f"pixel size {gt[1]:g} x {abs(gt[5]):g} m != expected {exp_x:g} x {exp_y:g} m")
+    if abs(gt[0] - exp_ox) > exp_x or abs(gt[3] - exp_oy) > exp_y:
+        bad.append(f"origin ({gt[0]:.0f}, {gt[3]:.0f}) != pinned ({exp_ox:.0f}, {exp_oy:.0f})")
+    return "; ".join(bad) if bad else None
+
+
+_MIN_COH_SAMPLES = 4   # below this the boxcar estimator is degenerate
+
+
+def _sliding_coherence(a, b, joint, win: int):
+    """Coherence from a `win` x `win` window CENTRED on every pixel.
+
+    The multilook box and the coherence window are different things. Block
+    multilooking averages disjoint boxes and shrinks the grid; coherence needs a
+    neighbourhood around each pixel and must NOT shrink it. At 1x1 looks the box
+    is a single sample and |a conj(b)| / sqrt(|a|^2 |b|^2) collapses to exactly
+    1.0 for every pixel -- a degenerate estimator, not a coherent scene.
+
+    Same estimator ISCE2 uses for phsig: normalised complex cross-correlation
+    over a sliding window, output at full input resolution.
+    """
+    from scipy.ndimage import uniform_filter
+
+    az = np.where(joint, a, 0)
+    bz = np.where(joint, b, 0)
+    prod = az * np.conj(bz)
+    k = dict(size=win, mode="nearest")
+    num_r = uniform_filter(prod.real.astype(np.float64), **k)
+    num_i = uniform_filter(prod.imag.astype(np.float64), **k)
+    p1 = uniform_filter((az.real.astype(np.float64) ** 2
+                         + az.imag.astype(np.float64) ** 2), **k)
+    p2 = uniform_filter((bz.real.astype(np.float64) ** 2
+                         + bz.imag.astype(np.float64) ** 2), **k)
+    den = np.sqrt(p1 * p2)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(den > 0, np.hypot(num_r, num_i) / den, np.nan)
+
 def run(cfg: Config, log: Logger, force: bool = False, dry_run: bool = False) -> Result:
     started = time.time()
     res = Result(stage="igram")
@@ -417,7 +503,16 @@ def run(cfg: Config, log: Logger, force: bool = False, dry_run: bool = False) ->
     for ref, sec in pairs:
         want = expected_outputs(cfg, ref, sec)
         have = [f for f in want if f.exists()]
-        if len(have) == len(want) and not force:
+        stale = _stale_against_pin(cfg, want, log) if have else None
+        if stale:
+            # Filename alone is not a sufficient key: the products are named by
+            # frequency and pol, NOT by geogrid, so changing geogrid.aoi_lonlat
+            # or the posting leaves outputs that pass an exists() check but
+            # describe a different patch of ground. Rebuild on any mismatch.
+            log.warn(f"  {ref}_{sec}: existing products are STALE -- {stale}")
+            log.warn(f"    rebuilding (they were made on a different geogrid)")
+            todo.append((ref, sec))
+        elif len(have) == len(want) and not force:
             log.info(f"  {ref}_{sec}: all {len(want)} product(s) present -- skipping "
                      f"(--force to rebuild)")
         else:
@@ -441,7 +536,7 @@ def run(cfg: Config, log: Logger, force: bool = False, dry_run: bool = False) ->
         info = form_pair(
             products[ref], products[sec], freq, pol, ry, rx, p["prefix"],
             {"ref": p["amp_ref"], "sec": p["amp_sec"]} if ic.per_date_amplitude else {},
-            ic.block_rows, log,
+            ic.block_rows, log, ic.coherence_window,
         )
         info["coherence"] = coherence_stats(p["coh"])
         log.info(f"    grid {info['length']} x {info['width']}  "

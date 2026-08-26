@@ -86,6 +86,10 @@ FREQ_SCALARS = (
 # --------------------------------------------------------------------------
 # discovery
 # --------------------------------------------------------------------------
+#: preferred subdirectory for L1 inputs, per asc/WORKFLOWS.md
+RSLC_SUBDIR = "L1_RSLC"
+
+
 def discover_granules(cfg: Config, log: Logger) -> list[Path]:
     """Explicit `granules:` list if given, else glob the case dir for RSLCs."""
     if cfg.granules:
@@ -96,20 +100,36 @@ def discover_granules(cfg: Config, log: Logger) -> list[Path]:
                 p = cfg.case / g
             out.append(p.resolve())
     else:
+        # Preferred layout is <case>/L1_RSLC/ (see asc/WORKFLOWS.md), which keeps
+        # the 49 GB of inputs separate from the derived products so either can be
+        # cleared independently. The case root is kept as a fallback because
+        # earlier runs put the granules there.
+        subdirs = (cfg.case / RSLC_SUBDIR, cfg.case)
         pats = ("NISAR_L1_*RSLC*.h5", "*RSLC*.h5")
         found: list[Path] = []
-        for pat in pats:
-            found = sorted(cfg.case.glob(pat))
+        searched: list[Path] = []
+        for d in subdirs:
+            searched.append(d)
+            if not d.is_dir():
+                continue
+            for pat in pats:
+                found = sorted(d.glob(pat))
+                if found:
+                    break
             if found:
                 break
         out = [p.resolve() for p in found]
-        log.info(f"auto-discovered {len(out)} RSLC granule(s) in {cfg.case}")
+        if out:
+            log.info(f"auto-discovered {len(out)} RSLC granule(s) in {out[0].parent}")
 
     if not out:
+        looked = "\n".join(f"    {d}" for d in searched) if not cfg.granules else ""
         raise ConfigError(
-            f"no NISAR L1 RSLC granules found in {cfg.case}\n"
+            f"no NISAR L1 RSLC granules found.\n"
+            f"  Looked in:\n{looked}\n"
             f"  Expected files matching 'NISAR_L1_*RSLC*.h5'.\n"
-            f"  Either place the granules there or set `granules:` explicitly in the config."
+            f"  Put them in {cfg.case / RSLC_SUBDIR}/ (preferred), or set "
+            f"`granules:` explicitly in the config."
         )
     for p in out:
         if not p.exists():
@@ -356,6 +376,37 @@ def compute_geogrid(metas: list[dict], cfg: Config, log: Logger) -> dict:
     xy = np.array([fwd.TransformPoint(float(lon), float(lat))[:2] for lon, lat in all_ll])
     x_min, x_max = float(xy[:, 0].min()), float(xy[:, 0].max())
     y_min, y_max = float(xy[:, 1].min()), float(xy[:, 1].max())
+
+    # Optional AOI: intersect the footprint envelope with a user box. The RSLC is
+    # never cropped -- gslc's block generator reads only the radar slice feeding
+    # each output block, so a smaller grid reads less of the granule by itself.
+    aoi = cfg.geogrid.aoi_lonlat
+    if aoi is not None:
+        w, sth, e, n = (float(v) for v in aoi)
+        # densify the AOI edges: a lon/lat box is curved in UTM
+        edge = np.linspace(0.0, 1.0, 51)
+        ring = np.vstack([
+            np.column_stack([w + (e - w) * edge, np.full_like(edge, sth)]),
+            np.column_stack([np.full_like(edge, e), sth + (n - sth) * edge]),
+            np.column_stack([e + (w - e) * edge, np.full_like(edge, n)]),
+            np.column_stack([np.full_like(edge, w), n + (sth - n) * edge]),
+        ])
+        axy = np.array([fwd.TransformPoint(float(lo), float(la))[:2] for lo, la in ring])
+        ax_min, ax_max = float(axy[:, 0].min()), float(axy[:, 0].max())
+        ay_min, ay_max = float(axy[:, 1].min()), float(axy[:, 1].max())
+        ix_min, ix_max = max(x_min, ax_min), min(x_max, ax_max)
+        iy_min, iy_max = max(y_min, ay_min), min(y_max, ay_max)
+        if ix_min >= ix_max or iy_min >= iy_max:
+            raise ConfigError(
+                f"geogrid.aoi_lonlat [{w}, {sth}, {e}, {n}] does not overlap the granule "
+                f"footprint [{lon_min:.4f}, {lat_min:.4f}, {lon_max:.4f}, {lat_max:.4f}]"
+            )
+        log.info(
+            f"AOI override [{w}, {sth}, {e}, {n}] -> intersected envelope "
+            f"x [{ix_min:.1f}, {ix_max:.1f}]  y [{iy_min:.1f}, {iy_max:.1f}]  "
+            f"({(ix_max - ix_min) / 1000:.1f} x {(iy_max - iy_min) / 1000:.1f} km)"
+        )
+        x_min, x_max, y_min, y_max = ix_min, ix_max, iy_min, iy_max
 
     margin = float(cfg.geogrid.margin_m)
     snap = float(cfg.geogrid.snap)

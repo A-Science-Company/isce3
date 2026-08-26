@@ -94,6 +94,18 @@ class GeogridConfig:
     epsg: int | None = None
     snap: float = 1000.0
     margin_m: float = 0.0
+    #: Optional AOI as [west, south, east, north] in DEGREES. When set, the
+    #: output grid covers this box INTERSECTED with the granule footprint,
+    #: instead of the full footprint union.
+    #:
+    #: This is not a crop of the RSLC and never needs to be. gslc.py iterates
+    #: geogrid blocks via isce3.core.rdr_geo_block_generator, which yields the
+    #: radar-coordinate slice feeding each output block, and reads only
+    #: `rslc_dataset[rdr_blk_slice]`. A smaller geogrid therefore reads less of
+    #: the 24.5 GB granule automatically. Matches the course's own semantics in
+    #: 2.1_ISCE3_TOPS_Processing/utils.py: "bbox_wsen=None -> stitch the ENTIRE
+    #: union extent; bbox_wsen=wsen -> clip the output to the AOI wsen."
+    aoi_lonlat: list[float] | None = None
     posting: dict[str, Posting] = field(
         default_factory=lambda: {
             "A": Posting(5.0, 5.0),
@@ -110,6 +122,25 @@ class GeogridConfig:
             raise ConfigError(f"geogrid.snap must be > 0 (got {self.snap})")
         if self.margin_m < 0:
             raise ConfigError(f"geogrid.margin_m must be >= 0 (got {self.margin_m})")
+        if self.aoi_lonlat is not None:
+            a = list(self.aoi_lonlat)
+            if len(a) != 4:
+                raise ConfigError(
+                    f"geogrid.aoi_lonlat must be [west, south, east, north] "
+                    f"(got {len(a)} value(s): {a})"
+                )
+            w, sth, e, n = (float(v) for v in a)
+            if not (-180 <= w < e <= 180):
+                raise ConfigError(
+                    f"geogrid.aoi_lonlat west/east must satisfy -180 <= west < east <= 180 "
+                    f"(got west={w}, east={e})"
+                )
+            if not (-90 <= sth < n <= 90):
+                raise ConfigError(
+                    f"geogrid.aoi_lonlat south/north must satisfy -90 <= south < north <= 90 "
+                    f"(got south={sth}, north={n})"
+                )
+            self.aoi_lonlat = [w, sth, e, n]
         for freq in frequencies:
             if freq not in self.posting:
                 raise ConfigError(
@@ -362,6 +393,10 @@ class IgramConfig:
     enabled: bool = True
     freq: str | None = None                  # None -> frequencies[0]
     pol: str | None = None                   # None -> polarizations[0]
+    #: Window (px) for the sliding-window coherence estimator, used when the
+    #: multilook box has fewer than 4 samples. Phase stays per-pixel; only the
+    #: coherence uses a neighbourhood, so the output grid is unchanged.
+    coherence_window: int = 5
     looks_y: int = 16
     looks_x: int = 2
     block_rows: int = 1024

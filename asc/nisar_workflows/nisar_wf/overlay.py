@@ -345,7 +345,17 @@ def wavelength_m(cfg: Config, stack: dict, freq: str) -> float:
 
 
 def html_path(cfg: Config, ref: str, sec: str) -> Path:
-    return pair_paths(cfg, ref, sec)["dir"] / cfg.overlay.html_name
+    """
+    Namespace the HTML by frequency and polarization, the way the rasters are.
+
+    Without this, a freq-A run finds the freq-B `trackG_overlay.html` already on
+    disk and silently SKIPs -- the rasters are `ifg_A_HH.*` vs `ifg_B_HH.*` and
+    never collide, but a single fixed html_name does.
+    """
+    freq = cfg.igram_freq
+    pol = cfg.igram_pol
+    stem = Path(cfg.overlay.html_name).stem
+    return pair_paths(cfg, ref, sec)["dir"] / f"{stem}_{freq}_{pol}.html"
 
 
 # ------------------------------------------------------------------- builder

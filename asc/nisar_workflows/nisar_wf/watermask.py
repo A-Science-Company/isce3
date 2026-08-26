@@ -142,6 +142,25 @@ def _geoid_undulation(transform, crs, height, width, block_rows, tr, log):
     return n_grid
 
 
+
+def _derive_reference(cfg: Config, log: Logger) -> Path | None:
+    """Locate this run's interferogram amplitude raster to use as the mask grid.
+
+    Follows cfg.igram_freq / cfg.igram_pol rather than a config literal, so the
+    mask is always built on the grid actually being processed.
+    """
+    pairs_dir = cfg.root / "pairs"
+    if not pairs_dir.is_dir():
+        return None
+    name = f"ifg_{cfg.igram_freq}_{cfg.igram_pol}.amp.tif"
+    hits = sorted(pairs_dir.glob(f"*/trackG/{name}"))
+    if not hits:
+        return None
+    if len(hits) > 1:
+        log.warn(f"  {len(hits)} candidate reference rasters; using {hits[0]}")
+    log.info(f"  reference grid derived from {hits[0].relative_to(cfg.root)}")
+    return hits[0]
+
 def run(cfg: Config, log: Logger, force: bool = False, dry_run: bool = False) -> Result:
     started = time.time()
     wm = cfg.watermask
@@ -150,12 +169,19 @@ def run(cfg: Config, log: Logger, force: bool = False, dry_run: bool = False) ->
 
     ref_path = Path(wm.reference_raster) if wm.reference_raster else None
     if ref_path is None:
+        # Derive from the interferogram this run is actually forming. Hardcoding
+        # it in the config goes stale the moment frequency, polarization or the
+        # date pair changes -- and the failure is a confusing "file not found"
+        # pointing at a frequency you are not processing.
+        ref_path = _derive_reference(cfg, log)
+    if ref_path is None:
         raise StepFailed(
-            "watermask.reference_raster is not set.\n"
+            "watermask.reference_raster is not set and could not be derived.\n"
             "  The mask is built on the grid of an existing product so it is\n"
-            "  pixel-aligned by construction. Point it at the interferogram, e.g.\n"
+            "  pixel-aligned by construction. Run the igram stage first, or set\n"
+            "  it explicitly:\n"
             "    watermask:\n"
-            "      reference_raster: pairs/20260613_20260625/trackG/ifg_B_HH.amp.tif"
+            f"      reference_raster: pairs/<ref>_<sec>/trackG/ifg_{cfg.igram_freq}_{cfg.igram_pol}.amp.tif"
         )
     if not ref_path.is_absolute():
         ref_path = cfg.root / ref_path

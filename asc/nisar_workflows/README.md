@@ -49,7 +49,7 @@ at the bottom.
 
 ```bash
 conda activate isce3_env
-cd /home/sharath/Desktop/work/isce3/asc/workflows
+cd /home/sharath/Desktop/work/isce3/asc/nisar_workflows
 
 # see the steps
 python run_track_g.py --list-steps

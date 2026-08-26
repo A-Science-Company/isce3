@@ -35,7 +35,7 @@ granules: []
 # freq A but 8x fewer range samples (6582 vs 52649), so it exercises the entire
 # pipeline end to end at roughly 1/8 the cost. Switch to [A] -- or [A, B] -- once
 # the workflow is trusted. Note freq A at 5 m posting is a ~29 GB/pol output.
-frequencies: [B]
+frequencies: [A]
 
 # HH only to start. HV is present in both granules and both frequencies; adding
 # it here doubles output size and geocoding time.
@@ -61,6 +61,26 @@ geogrid:
 
   # Extra padding beyond the footprint union, in metres, applied before snapping.
   margin_m: 0.0
+
+  # AOI as [west, south, east, north] in degrees. Output grid = this box
+  # INTERSECTED with the granule footprint. Leave null for the full frame.
+  #
+  # NOT a crop of the RSLC and never needs to be: gslc.py iterates geogrid
+  # blocks via rdr_geo_block_generator and reads only rslc_dataset[rdr_blk_slice],
+  # so a smaller grid reads less of the 24.5 GB granule automatically. Same
+  # semantics as the course's bbox_wsen in 2.1/utils.py.
+  #
+  # Chosen from the freq-B products already on disk: of all 60x60 km boxes with
+  # >=85% land, this one had the best coherence -- median 0.632 (scene-wide is
+  # 0.432), 78.6% above 0.5, 92.9% land. Western massif, inland of the coast.
+  # At 5 m: 12000 x 12000 px, 2.41 GiB for the pair (HH only, uncompressed).
+  # AOI B -- spans the full ~150 km San Sebastian rupture AND the western lobe.
+  # Chosen after confirming against the freq-B fringes (qa/aoi_check.png,
+  # qa/fault_zoom.png): the Mw7.2/7.5 nucleation points sit at the WESTERN END
+  # of the trace (10.436N 68.528W and 10.435N 68.472W) and the rupture ran east,
+  # so the deformation field extends ~150 km east of the epicentres.
+  # 275 x 150 km -> 55000 x 30000 px at 5 m, 27.7 GiB/pair uncompressed.
+  aoi_lonlat: [-68.90, 10.10, -67.20, 10.90]
 
   # Output pixel spacing in metres, per frequency. Positive; ISCE3 applies the
   # sign for the northing axis itself.
@@ -182,13 +202,17 @@ igram:
   # Block-average factors in ROWS and COLUMNS of the GSLC grid (not radar
   # range/azimuth). The freq-B posting is 40 x 5 m, so 16 rows x 2 cols gives
   # square 80 x 80 m output pixels: 59800 x 7575 -> 3737 x 3787.
-  looks_y: 16
-  looks_x: 2
+  # freq A posting is 5 x 5 m -- essentially SQUARE (native 4.72 rg x 4.46 az),
+  # so equal looks are correct here. 16 x 16 -> 80 x 80 m, matching the freq-B
+  # product's analysis scale so the two bands are directly comparable.
+  # (The asymmetric 16 x 2 above was for freq B's 40 x 5 m posting.)
+  looks_y: 1
+  looks_x: 1
 
   # Streaming block height in GSLC rows. Multiple of BOTH looks_y (16) and the
   # 512-row HDF5 chunking, so look boxes never straddle a block boundary and
   # gzip never re-inflates the same chunk twice. ~350 MB peak.
-  block_rows: 1024
+  block_rows: 512
 
   # Each date's own multilooked amplitude, on the same grid. The pair's .amp
   # band is the GEOMETRIC MEAN of the two dates and cannot show per-date
@@ -213,7 +237,9 @@ watermask:
   enabled: true
   method: dem_orthometric
   # Built on the interferogram grid, so it is pixel-aligned by construction.
-  reference_raster: pairs/20260613_20260625/trackG/ifg_B_HH.amp.tif
+  # null -> derived from igram.freq / igram.pol and the pair on disk. Setting a
+  # literal here goes stale whenever frequency, polarization or the pair changes.
+  reference_raster: null
   geoid_crs: EPSG:9518          # WGS84 + EGM2008 height
   sea_level_margin_m: 1.0       # H <= this is water; flat plateau over 0.25-3 m
   include_inland: false         # true also catches Lake Valencia (dark + elevated)
@@ -274,9 +300,19 @@ unwrap:
   # far faster and lighter on this 14.2 Mpx grid, but per-tile reoptimisation
   # changes the solution and the connected-component labelling: a scientific
   # change, not a performance flag. The config layer warns if you change it.
-  ntiles: [1, 1]
-  tile_overlap: 0
-  nproc: 1
+  # TILED. At 1x1 looks the grid is ~662 Mpx; a single-tile solve needs ~250 GB.
+  # Measured scaling: peak RAM tracks TILE size x nproc, not total grid
+  # (4.94 Mpx needs 1.77 GB untiled but 0.55 GB at [4,4] with nproc 4).
+  # [20,40] -> ~890 x 930 px tiles; +200 px overlap each side -> ~1.7 Mpx
+  # effective, ~0.66 GB per process, ~5.3 GB at nproc 8.
+  #
+  # tile_overlap is a CORRECTNESS parameter, not a speed knob: it is the region
+  # snaphu uses to resolve the integer 2*pi offset between neighbouring tiles.
+  # Too small and adjacent tiles settle on offsets differing by a cycle, giving
+  # a seam that can masquerade as a fault. 200 px = 1 km at 5 m posting.
+  ntiles: [20, 40]
+  tile_overlap: 200
+  nproc: 8
   single_tile_reoptimize: true
 
   # Applied by ZEROING the interferogram, not via snaphu's mask= argument --
