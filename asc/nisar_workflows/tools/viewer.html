@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>NISAR Track G viewer</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  html,body,#map{height:100%;margin:0}
+  #panel{position:absolute;top:10px;right:10px;z-index:1000;background:rgba(255,255,255,.95);
+         padding:10px 12px;border-radius:6px;font:13px/1.5 system-ui,sans-serif;
+         max-width:290px;box-shadow:0 1px 6px rgba(0,0,0,.35)}
+  #panel h3{margin:0 0 6px;font-size:13px}
+  #panel label{display:block;cursor:pointer}
+  #readout{position:absolute;bottom:10px;left:10px;z-index:1000;background:rgba(0,0,0,.78);
+           color:#fff;padding:7px 11px;border-radius:5px;font:12px/1.45 ui-monospace,monospace}
+  .row{display:flex;gap:6px;align-items:center;margin:3px 0}
+  .row input[type=range]{flex:1}
+  #bar{height:11px;border-radius:2px;margin:3px 0 1px}
+  .lim{display:flex;justify-content:space-between;font:11px ui-monospace,monospace;color:#444}
+  #note{margin-top:8px;padding-top:7px;border-top:1px solid #ddd;font-size:11px;color:#555}
+</style>
+<div id="map"></div>
+<div id="panel">
+  <h3>Layer</h3>
+  <div id="layers"></div>
+  <div class="row"><span>opacity</span><input id="op" type="range" min="0" max="1" step="0.05" value="0.85"></div>
+  <div id="bar"></div>
+  <div class="lim"><span id="lo"></span><span id="hi"></span></div>
+  <div id="note"></div>
+</div>
+<div id="readout">move the cursor over the image</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/georaster@1.6.0/dist/georaster.browser.bundle.min.js"></script>
+<script src="https://unpkg.com/georaster-layer-for-leaflet@3.10.0/dist/georaster-layer-for-leaflet.min.js"></script>
+<script>
+// Colour maps. Wrapped phase MUST be cyclic (hsv) -- a linear map puts a false
+// discontinuity at +/-pi. Unwrapped phase is diverging about zero. Coherence and
+// amplitude are sequential.
+const hsv = t => { const h=(t%1+1)%1*6, i=Math.floor(h), f=h-i,
+  q=[[1,f,0],[1-f,1,0],[0,1,f],[0,1-f,1],[f,0,1],[1,0,1-f]][i%6];
+  return [q[0]*255|0,q[1]*255|0,q[2]*255|0]; };
+const grey = t => { const v=Math.max(0,Math.min(1,t))*255|0; return [v,v,v]; };
+const viridis = t => { t=Math.max(0,Math.min(1,t));
+  const c=[[68,1,84],[59,82,139],[33,145,140],[94,201,98],[253,231,37]];
+  const x=t*(c.length-1), i=Math.min(c.length-2,Math.floor(x)), f=x-i;
+  return [0,1,2].map(k=>c[i][k]+(c[i+1][k]-c[i][k])*f|0); };
+const rdbu = t => { t=Math.max(0,Math.min(1,t));
+  const c=[[5,48,97],[146,197,222],[247,247,247],[244,165,130],[103,0,31]];
+  const x=t*(c.length-1), i=Math.min(c.length-2,Math.floor(x)), f=x-i;
+  return [0,1,2].map(k=>c[i][k]+(c[i+1][k]-c[i][k])*f|0); };
+const tab20 = v => { const p=[[31,119,180],[255,127,14],[44,160,44],[214,39,40],[148,103,189],
+  [140,86,75],[227,119,194],[127,127,127],[188,189,34],[23,190,207]];
+  return v<=0?null:p[(Math.round(v)-1)%p.length]; };
+
+const SPEC = {
+  amp:             {cmap:grey,    unit:"dB",  label:"amplitude"},
+  wrapped_phase:   {cmap:hsv,     unit:"rad", label:"wrapped phase", fixed:[-Math.PI,Math.PI], cyclic:true},
+  coherence:       {cmap:viridis, unit:"",    label:"coherence",     fixed:[0,1]},
+  phsig:           {cmap:viridis, unit:"",    label:"phase-sigma coh", fixed:[0,1]},
+  unwrapped_phase: {cmap:rdbu,    unit:"rad", label:"unwrapped phase", diverging:true},
+  conncomp:        {cmap:tab20,   unit:"",    label:"connected component", categorical:true},
+};
+
+const map = L.map("map", {preferCanvas:true});
+L.tileLayer("https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
+            {attribution:"Google Satellite", maxZoom:20, maxNativeZoom:19}).addTo(map);
+
+let current=null, currentSpec=null, currentName=null;
+const $ = id => document.getElementById(id);
+
+function specFor(name){
+  for (const k in SPEC) if (name.startsWith(k)) return SPEC[k];
+  return SPEC.amp;
+}
+
+function drawBar(spec, lo, hi){
+  if (spec.categorical){ $("bar").style.background="#ddd";
+    $("lo").textContent="discrete labels"; $("hi").textContent=""; return; }
+  const stops=[]; for(let i=0;i<=20;i++){ const c=spec.cmap(i/20);
+    stops.push(`rgb(${c[0]},${c[1]},${c[2]}) ${i*5}%`); }
+  $("bar").style.background=`linear-gradient(90deg,${stops.join(",")})`;
+  $("lo").textContent=lo.toFixed(2)+" "+spec.unit;
+  $("hi").textContent=hi.toFixed(2)+" "+spec.unit;
+}
+
+async function show(layer, manifest){
+  const spec = specFor(layer.name);
+  let lo=layer.min, hi=layer.max;
+  if (spec.fixed){ [lo,hi]=spec.fixed; }
+  else if (spec.diverging){ const m=Math.max(Math.abs(lo),Math.abs(hi)); lo=-m; hi=m; }
+
+  $("note").innerHTML =
+    `<b>${layer.file}</b> &mdash; ${layer.mb} MB COG, read by range request.<br>` +
+    (spec.cyclic ? "cyclic colour map; one full cycle = 12.1 cm LOS.<br>" : "") +
+    (spec.categorical ? "each component has its OWN arbitrary 2&pi; offset &mdash; " +
+                        "only pixels sharing a label are comparable.<br>" : "") +
+    `pair ${manifest.ref_date}&rarr;${manifest.sec_date}, freq ${manifest.freq} ${manifest.pol} (HH only, no VV).`;
+
+  if (current) map.removeLayer(current);
+  $("readout").textContent = "loading " + layer.file + " ...";
+  const georaster = await parseGeoraster(layer.file);   // COG: streamed, not fully loaded
+  current = new GeoRasterLayer({
+    georaster, opacity:parseFloat($("op").value), resolution:256,
+    pixelValuesToColorFn: v => {
+      const x=v[0];
+      if (x===null || !isFinite(x)) return null;
+      if (spec.categorical) { const c=spec.cmap(x); return c?`rgb(${c[0]},${c[1]},${c[2]})`:null; }
+      const c=spec.cmap((x-lo)/(hi-lo));
+      return `rgb(${c[0]},${c[1]},${c[2]})`;
+    },
+  });
+  current.addTo(map);
+  currentSpec=spec; currentName=layer.name;
+  if (!show._fit){ map.fitBounds(current.getBounds()); show._fit=true; }
+  drawBar(spec, lo, hi);
+  $("readout").textContent = spec.label + " ready";
+}
+
+map.on("mousemove", e => {
+  if (!current) return;
+  const v = current.getValueAtLatLng ? null : null;   // fall through to sampling below
+  try {
+    const vals = current.getValues ? current.getValues(e.latlng) : null;
+    void vals;
+  } catch (_) {}
+  const ll = `${e.latlng.lat.toFixed(5)}, ${e.latlng.lng.toFixed(5)}`;
+  $("readout").textContent = `${currentSpec ? currentSpec.label : ""}   lat,lon ${ll}`;
+});
+
+(async () => {
+  const manifest = await (await fetch("manifest.json")).json();
+  const box = $("layers");
+  manifest.layers.forEach((l,i) => {
+    const id="L"+i;
+    box.insertAdjacentHTML("beforeend",
+      `<label><input type="radio" name="layer" id="${id}" ${i===0?"checked":""}> ${specFor(l.name).label} <span style="color:#888">${l.name}</span></label>`);
+    document.getElementById(id).addEventListener("change", () => show(l, manifest));
+  });
+  $("op").addEventListener("input", e => { if (current) current.setOpacity(parseFloat(e.target.value)); });
+  await show(manifest.layers[0], manifest);
+})();
+</script>

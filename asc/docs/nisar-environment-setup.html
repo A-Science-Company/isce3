@@ -1,0 +1,592 @@
+<title>NISAR ISCE3 Environment Setup</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Serif:ital,wght@0,400;0,500;1,400&display=swap">
+<style>
+  :root{
+    --ground:#fafbfb; --panel:#ffffff; --ink:#101619; --ink-2:#3a4a51;
+    --muted:#5b6b73; --rule:#dde4e7; --rule-2:#eceff1;
+    --accent:#0b6e78; --accent-soft:#e4f1f2;
+    --warn:#b45309; --warn-soft:#fdf3e7;
+    --ok:#15803d; --ok-soft:#e9f5ec;
+    --code-bg:#f2f5f6;
+    --sans:"IBM Plex Sans",ui-sans-serif,system-ui,sans-serif;
+    --serif:"IBM Plex Serif",Georgia,serif;
+    --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme="light"]){
+      --ground:#10151a; --panel:#161d23; --ink:#e6edf0; --ink-2:#b9c8cf;
+      --muted:#8fa3ac; --rule:#26313a; --rule-2:#1c242b;
+      --accent:#4fc3ce; --accent-soft:#123034;
+      --warn:#e5a45c; --warn-soft:#2b2113;
+      --ok:#6cc48a; --ok-soft:#132a1c;
+      --code-bg:#0c1116;
+    }
+  }
+  :root[data-theme="dark"]{
+    --ground:#10151a; --panel:#161d23; --ink:#e6edf0; --ink-2:#b9c8cf;
+    --muted:#8fa3ac; --rule:#26313a; --rule-2:#1c242b;
+    --accent:#4fc3ce; --accent-soft:#123034;
+    --warn:#e5a45c; --warn-soft:#2b2113;
+    --ok:#6cc48a; --ok-soft:#132a1c;
+    --code-bg:#0c1116;
+  }
+
+  *{box-sizing:border-box}
+  body{background:var(--ground);color:var(--ink);font-family:var(--serif);
+       font-size:16.5px;line-height:1.65;margin:0}
+  .wrap{max-width:1180px;margin:0 auto;padding:0 28px;
+        display:grid;grid-template-columns:1fr;gap:0}
+  @media (min-width:1040px){
+    .wrap{grid-template-columns:210px minmax(0,1fr);gap:52px;padding:0 40px}
+  }
+
+  header.top{border-bottom:1px solid var(--rule);margin-bottom:38px;padding:44px 0 26px;
+             grid-column:1/-1}
+  .eyebrow{font-family:var(--sans);font-size:11.5px;font-weight:600;letter-spacing:.13em;
+           text-transform:uppercase;color:var(--accent);margin:0 0 10px}
+  h1{font-family:var(--sans);font-weight:700;font-size:clamp(28px,4.4vw,40px);
+     line-height:1.14;margin:0 0 12px;letter-spacing:-.02em;text-wrap:balance}
+  .lede{font-size:17.5px;color:var(--ink-2);max-width:62ch;margin:0}
+  .meta{font-family:var(--mono);font-size:12.5px;color:var(--muted);margin-top:18px;
+        display:flex;flex-wrap:wrap;gap:6px 20px}
+
+  nav.toc{font-family:var(--sans);font-size:13.5px;line-height:1.5}
+  @media (min-width:1040px){
+    nav.toc{position:sticky;top:26px;align-self:start;max-height:calc(100vh - 52px);
+            overflow:auto;padding-bottom:40px}
+  }
+  nav.toc p{font-size:11px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;
+            color:var(--muted);margin:0 0 10px}
+  nav.toc a{display:block;color:var(--ink-2);text-decoration:none;padding:4px 0;
+            border-left:2px solid transparent;padding-left:11px;margin-left:-11px}
+  nav.toc a:hover{color:var(--accent);border-left-color:var(--accent)}
+  nav.toc a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+  main{min-width:0;padding-bottom:80px}
+  section{margin-bottom:46px;scroll-margin-top:22px}
+  h2{font-family:var(--sans);font-weight:600;font-size:22px;letter-spacing:-.01em;
+     margin:0 0 4px;padding-bottom:9px;border-bottom:1px solid var(--rule);text-wrap:balance}
+  h2 .n{color:var(--muted);font-variant-numeric:tabular-nums;margin-right:10px;font-weight:500}
+  h3{font-family:var(--sans);font-weight:600;font-size:16px;margin:30px 0 6px;text-wrap:balance}
+  p{margin:12px 0;max-width:68ch}
+  ul,ol{max-width:68ch;padding-left:22px}
+  li{margin:6px 0}
+  a{color:var(--accent)}
+  strong{font-weight:600}
+  em{font-style:italic}
+
+  code{font-family:var(--mono);font-size:.87em;background:var(--code-bg);
+       padding:1.5px 5px;border-radius:3px;border:1px solid var(--rule-2)}
+  pre{font-family:var(--mono);font-size:13px;line-height:1.55;background:var(--code-bg);
+      border:1px solid var(--rule);border-radius:6px;padding:14px 16px;overflow-x:auto;
+      margin:14px 0}
+  pre code{background:none;border:none;padding:0;font-size:inherit}
+
+  .tw{overflow-x:auto;margin:16px 0;border:1px solid var(--rule);border-radius:6px}
+  table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:13.5px}
+  th,td{text-align:left;padding:9px 13px;border-bottom:1px solid var(--rule-2);
+        vertical-align:top}
+  th{font-weight:600;font-size:11.5px;letter-spacing:.07em;text-transform:uppercase;
+     color:var(--muted);background:var(--panel);white-space:nowrap}
+  tr:last-child td{border-bottom:none}
+  td.num{font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+
+  .box{border:1px solid var(--rule);border-radius:6px;background:var(--panel);
+       padding:15px 18px;margin:18px 0}
+  .box p:first-child{margin-top:0} .box p:last-child{margin-bottom:0}
+
+  .issue{border:1px solid var(--rule);border-radius:6px;background:var(--panel);
+         margin:16px 0;overflow:hidden}
+  .issue > .hd{display:flex;gap:11px;align-items:baseline;padding:12px 16px;
+               border-bottom:1px solid var(--rule-2);background:var(--warn-soft)}
+  .issue .tag{font-family:var(--mono);font-size:11.5px;font-weight:500;color:var(--warn);
+              white-space:nowrap;padding-top:1px}
+  .issue .ttl{font-family:var(--sans);font-weight:600;font-size:15px;line-height:1.35}
+  .issue .bd{padding:4px 16px 14px}
+  .issue dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:2px 14px;
+            align-items:baseline}
+  @media (max-width:620px){.issue dl{grid-template-columns:1fr;gap:0}}
+  .issue dt{font-family:var(--sans);font-size:11px;font-weight:600;letter-spacing:.08em;
+            text-transform:uppercase;color:var(--muted);padding-top:11px;white-space:nowrap}
+  .issue dd{margin:0;padding-top:8px;max-width:66ch}
+  .issue dd:last-of-type{padding-bottom:2px}
+  .fixed dt.f{color:var(--ok)}
+
+  .pill{display:inline-block;font-family:var(--sans);font-size:11px;font-weight:600;
+        letter-spacing:.05em;text-transform:uppercase;padding:2px 8px;border-radius:20px;
+        border:1px solid currentColor;white-space:nowrap}
+  .pill.ok{color:var(--ok);background:var(--ok-soft)}
+  .pill.open{color:var(--warn);background:var(--warn-soft)}
+
+  hr.sep{border:none;border-top:1px solid var(--rule);margin:40px 0}
+  .foot{font-family:var(--sans);font-size:12.5px;color:var(--muted);
+        border-top:1px solid var(--rule);padding-top:18px;margin-top:10px}
+</style>
+
+<div class="wrap">
+<header class="top">
+  <p class="eyebrow">Engineering setup note</p>
+  <h1>NISAR ISCE3 Environment Setup</h1>
+  <p class="lede">How the ISCE3 processing environment was built for NISAR interferometry,
+  why each choice was made, and every problem hit along the way — including the ones that
+  fail silently.</p>
+  <p class="meta">
+    <span>isce3 0.25.12 (CPU)</span><span>python 3.12.13</span>
+    <span>compass 0.5.6</span><span>branch <code>s1-nisar-setup</code></span>
+  </p>
+</header>
+
+<nav class="toc">
+  <p>Contents</p>
+  <a href="#overview">Overview</a>
+  <a href="#decisions">Key decisions</a>
+  <a href="#install">Installation</a>
+  <a href="#verify">Verification</a>
+  <a href="#creds">Credentials</a>
+  <a href="#dem">DEM and water mask</a>
+  <a href="#problems">Problems encountered</a>
+  <a href="#limits">Machine limits</a>
+  <a href="#open">Open issues</a>
+</nav>
+
+<main>
+
+<section id="overview">
+  <h2><span class="n">1</span>Overview</h2>
+  <p>Two conda environments, both built from <strong>conda-forge binaries</strong> rather than
+  from source. They sit alongside the existing <code>isce2_env</code>, which is never modified.</p>
+
+  <div class="tw"><table>
+    <tr><th>Environment</th><th>Purpose</th><th>Key packages</th></tr>
+    <tr><td><code>isce3_env</code></td><td>NISAR workflows, Sentinel-1 CSLC</td>
+        <td>isce3 0.25.12 <span class="num">(_cpu)</span>, compass 0.5.6, s1reader, snaphu-py 0.4.1</td></tr>
+    <tr><td><code>dolphin_env</code></td><td>Phase linking, time series</td>
+        <td>dolphin 0.42.5, mintpy 1.6.4, opera-utils</td></tr>
+    <tr><td><code>isce2_env</code></td><td>Existing ISCE2 work — <strong>untouched</strong></td>
+        <td>isce2 2.6.5</td></tr>
+  </table></div>
+
+  <p>Definition files live in the repo at <code>asc/env/isce3_env.yml</code> and
+  <code>asc/env/dolphin_env.yml</code>, with a verification script at
+  <code>asc/env/verify.sh</code>.</p>
+
+  <div class="tw"><table>
+    <tr><th>Component</th><th>Version</th><th>Note</th></tr>
+    <tr><td>python</td><td class="num">3.12.13</td><td>3.11 does not work — see problem 1</td></tr>
+    <tr><td>isce3</td><td class="num">0.25.12</td><td>CPU variant, auto-selected</td></tr>
+    <tr><td>GDAL</td><td class="num">3.12.4</td><td></td></tr>
+    <tr><td>numpy / scipy</td><td class="num">1.26.4 / 1.12.0</td><td>scipy capped by compass</td></tr>
+    <tr><td>h5py / HDF5</td><td class="num">3.16.0 / 2.2.0</td><td>version skew — benign, see problem 6</td></tr>
+    <tr><td>pyproj</td><td class="num">3.7.2</td><td>needs the EGM2008 grid</td></tr>
+  </table></div>
+</section>
+
+<section id="decisions">
+  <h2><span class="n">2</span>Key decisions</h2>
+
+  <h3>conda-forge binaries, not a source build</h3>
+  <p>The upstream <code>develop</code> branch is <code>0.26.0-dev</code> and unreleased, while
+  conda-forge ships <code>0.25.12</code> with an identical Python API and the same
+  <code>nisar.workflows</code> entry points. The build machine has <em>no compiler at all</em> —
+  <code>gcc</code>, <code>g++</code>, <code>make</code>, <code>cmake</code> and <code>ninja</code>
+  are all absent — and a pybind11/Eigen compile at meaningful parallelism is a coin-flip against
+  the OOM killer on 13&nbsp;GB of RAM. Building from source buys nothing here.</p>
+
+  <h3>Two environments, not one</h3>
+  <p>Two independent constraints force the split:</p>
+  <ul>
+    <li><code>compass 0.5.6</code> requires <code>scipy&nbsp;&lt;1.13</code>; <code>dolphin 0.42.5</code>
+        wants <code>scipy&nbsp;&ge;1.12</code>. Co-installing pins everything to exactly
+        <code>scipy 1.12.0</code> and <code>numpy&nbsp;&lt;2</code>.</li>
+    <li><code>isce2 2.6.x</code> pins <code>libgdal-core&nbsp;&ge;3.10.3,&lt;3.11</code>, which drags
+        <code>isce3</code> back to <strong>0.24.4</strong> (April 2025). Excluding isce2 is what
+        buys 0.25.12.</li>
+  </ul>
+  <p>The isce+ course environment (<code>isceplus2026.yml</code>, env name
+  <code>earthscope_insar</code>) bundles isce2, isce3, compass, dolphin and mintpy together. It
+  <em>does</em> solve — but it resolves isce3 to that 15-month-old 0.24.4. It was not used.</p>
+
+  <h3>No GPU</h3>
+  <p>The machine has an AMD integrated GPU; <code>nvidia-smi</code> and <code>nvcc</code> are
+  absent. There is no <code>__cuda</code> virtual package, and every <code>*_cuda</code> isce3
+  build requires <code>__cuda&nbsp;&ge;12</code>, so conda selects the <code>_cpu</code> variant
+  automatically. No flag is needed. Verify with
+  <code>hasattr(isce3.ext.isce3, "cuda")</code>, which must be <code>False</code>.</p>
+
+  <div class="box">
+    <p><strong>Never set <code>gpu_enabled: true</code> in a NISAR runconfig on this machine.</strong>
+    <code>isce3.core.gpu_check.use_gpu()</code> <em>raises</em> on a CPU build. The shipped defaults
+    in <code>share/nisar/defaults/insar.yaml</code> and <code>gslc.yaml</code> are already
+    <code>false</code>, but a JPL production runconfig copied verbatim will not be.</p>
+  </div>
+</section>
+
+<section id="install">
+  <h2><span class="n">3</span>Installation</h2>
+  <p>Nothing else is required — no <code>mamba</code> install (conda 26.5.3 already defaults to
+  the libmamba solver) and no channel edits (both YAMLs carry <code>nodefaults</code>).</p>
+<pre><code>cd /home/sharath/Desktop/work/isce3
+conda env create -f asc/env/isce3_env.yml     # isce3 0.25.12 + compass 0.5.6
+conda env create -f asc/env/dolphin_env.yml   # dolphin 0.42.5 + mintpy
+bash asc/env/verify.sh                        # must print ALL CHECKS PASSED</code></pre>
+
+  <h3>Packages that must be listed explicitly</h3>
+  <p>The conda recipes for <code>isce3</code>, <code>compass</code> and <code>s1reader</code> do
+  not declare these, so a clean install omits them and the failure appears only at runtime.</p>
+  <div class="tw"><table>
+    <tr><th>Package</th><th>Imported by</th><th>Scope</th><th>Without it</th></tr>
+    <tr><td><code>pyaps3</code></td><td><code>nisar/workflows/troposphere.py</code></td>
+        <td>module level</td><td><code>from nisar.workflows import insar</code> fails</td></tr>
+    <tr><td><code>fiona</code></td><td><code>s1reader/utils/plot_bursts.py</code></td>
+        <td>module level</td><td>hard <code>ImportError</code></td></tr>
+    <tr><td><code>geopandas</code></td><td>same file</td><td>module level</td>
+        <td>hard <code>ImportError</code></td></tr>
+    <tr><td><code>s1etad</code></td><td><code>s1reader/s1_etad.py</code></td><td>module level</td>
+        <td>S1 ETAD correction unavailable</td></tr>
+    <tr><td><code>boto3</code></td><td><code>stage_dem</code>, <code>stage_watermask</code></td>
+        <td>function level</td><td>non-fatal; loses the AWS pre-flight check</td></tr>
+    <tr><td><code>dem_stitcher</code></td><td>GUNW DEM staging</td><td>—</td>
+        <td>DEM stitching cell fails</td></tr>
+  </table></div>
+
+  <h3>Deliberately excluded</h3>
+  <p><code>raider-base</code> appears in upstream's own <code>environment.yml</code>, but both
+  call sites (<code>nisar/workflows/troposphere.py</code>, <code>compass/utils/lut.py</code>) are
+  <em>function level</em> and only reached when a runconfig selects <code>package: raider</code>.
+  Installing it pulls dask and scikit-learn and downgrades jupyterlab 4.6→3.5, ipython 9→8,
+  pandas and jsonschema. Put it in a throwaway environment if RAiDER tropospheric correction is
+  ever needed.</p>
+</section>
+
+<section id="verify">
+  <h2><span class="n">4</span>Verification</h2>
+  <p>Beyond <code>verify.sh</code>, this sweep imports every module of every installed package —
+  the only reliable way to catch a missing transitive dependency.</p>
+<pre><code>conda run -n isce3_env python -c "
+import importlib, pkgutil, warnings; warnings.filterwarnings('ignore')
+import nisar, isce3, compass, s1reader
+bad = []
+for pkg in (nisar, isce3, compass, s1reader):
+    for m in pkgutil.walk_packages(pkg.__path__, pkg.__name__+'.', onerror=bad.append):
+        try: importlib.import_module(m.name)
+        except Exception as e: bad.append(f'{m.name}: {type(e).__name__}')
+print('FAILURES:', len(bad)); [print(' ', b) for b in sorted(set(bad))]
+"</code></pre>
+  <p><strong>Expected result: exactly one failure, <code>isce3.cuda</code></strong> — correct on a
+  CPU build. Current state is 331 modules swept, 330 importing cleanly. Anything else in that list
+  is a real gap.</p>
+</section>
+
+<section id="creds">
+  <h2><span class="n">5</span>Credentials</h2>
+  <p>One NASA Earthdata Login covers nearly everything. Register at
+  <a href="https://urs.earthdata.nasa.gov/home">urs.earthdata.nasa.gov</a> and accept the ASF DAAC
+  license agreements for Sentinel-1 and ALOS.</p>
+<pre><code>echo "machine urs.earthdata.nasa.gov login USERNAME password PASSWORD" &gt; $HOME/.netrc
+chmod 600 $HOME/.netrc</code></pre>
+  <p>The <code>chmod</code> is not optional — several tools refuse to run against a
+  world-readable <code>.netrc</code>.</p>
+  <p>That single file serves: burst download (<code>burst2stack</code>), precise orbits
+  (<code>eof --force-asf</code>), IONEX/TEC from CDDIS, the NISAR DEM, NASADEM, <code>asf_search</code>,
+  NISAR product downloads, and NISAR S3 direct access. <strong>No CDSE / Copernicus Dataspace
+  account is required</strong> — bursts and orbits come from ASF and the DEM from a public bucket.</p>
+  <p>Optional: <code>~/.cdsapirc</code> for PyAPS/ERA5 tropospheric correction (use the CDS
+  <em>Personal Access Token</em>; the legacy key returns 401), and <code>~/.topoapi</code> for
+  OpenTopography, which the ISCE3/COMPASS path does not use.</p>
+</section>
+
+<section id="dem">
+  <h2><span class="n">6</span>DEM and water mask</h2>
+  <p>The DEM is fetched by <code>sardem --data-source NISAR</code>, which streams from a global
+  VRT at ASF via <code>/vsicurl/</code> so only the requested bounding box is pulled:</p>
+<pre><code>https://nisar.asf.earthdatacloud.nasa.gov/NISAR/DEM/v1.2/EPSG4326/EPSG4326.vrt</code></pre>
+  <p>This is the <strong>Modified Copernicus DEM for NISAR</strong> — Copernicus GLO-30
+  (<code>COP-DEM_GLO-30-DGED/2023_1</code>) with two changes made for NISAR processing: the
+  vertical datum converted from the EGM2008 geoid to the <strong>WGS84 ellipsoid</strong>, and
+  ocean tiles filled with the EGM2008 geoid model for complete global coverage. Resolution is
+  1&nbsp;arcsec (~30&nbsp;m), EPSG:4326, Float32.</p>
+
+  <div class="box">
+    <p><strong>Why the datum matters.</strong> ISCE3 geometry (<code>geo2rdr</code>,
+    <code>geocode_slc</code>) requires heights above the <em>ellipsoid</em>. Raw Copernicus GLO-30
+    ships <em>geoid</em> heights. Over northern Venezuela the undulation runs −9&nbsp;m to
+    −38&nbsp;m, so skipping the conversion puts tens of metres of error straight into the range
+    computation.</p>
+    <p><strong>How to check it in one line:</strong> read the ocean. An ellipsoidal DEM reads
+    <em>negative</em> there (≈&nbsp;−28&nbsp;m, the negative undulation); a geoid-referenced one
+    reads ≈&nbsp;0. Exact zeros across the ocean mean zero-fill, i.e. a broken download.</p>
+  </div>
+
+  <p>An independent Copernicus route is available at
+  <code>asc/nisar_workflows/tools/fetch_cop_dem.py</code>, which pulls GLO-30 through Microsoft
+  Planetary Computer's STAC API and converts EGM2008&nbsp;→&nbsp;WGS84 with gdalwarp. It runs under
+  <code>isce2_env</code>, because <code>planetary-computer</code> and <code>pystac-client</code>
+  are installed there rather than in <code>isce3_env</code>. Cross-checking the two routes over the
+  Caribbean gave −30.54&nbsp;m and −28.24&nbsp;m median — agreement to ~2&nbsp;m from two different
+  pipelines.</p>
+
+  <p>The water mask is derived by converting the ellipsoidal DEM <em>back</em> to orthometric
+  (EPSG:4979&nbsp;→&nbsp;EPSG:9518, EGM2008) via pyproj and thresholding at 0&nbsp;m — preserving
+  the course's <code>water = (h &le; 0)</code> semantics.</p>
+</section>
+
+<hr class="sep">
+
+<section id="problems">
+  <h2><span class="n">7</span>Problems encountered</h2>
+  <p>Recorded because most of these fail <em>quietly</em> — the install succeeds, the run
+  completes, and the output is wrong or absent rather than the process erroring.</p>
+
+  <h3>Environment</h3>
+
+  <div class="issue fixed">
+    <div class="hd"><span class="tag">P1</span>
+      <span class="ttl">python 3.11 silently breaks <code>nisar.workflows.insar</code></span></div>
+    <div class="bd"><dl>
+      <dt>Symptom</dt><dd>Environment installs perfectly. At runtime,
+        <code>from nisar.workflows import insar</code> raises
+        <code>ModuleNotFoundError: No module named 'pyaps3'</code>.</dd>
+      <dt>Cause</dt><dd><code>troposphere.py</code> imports <code>pyaps3</code> at module scope;
+        <code>pyaps3</code> hard-depends on <code>pygrib</code>; and conda-forge has
+        <strong>no py311 build of pygrib</strong> — only py312, py313 and py314.</dd>
+      <dt class="f">Resolution</dt><dd>python 3.12 for both environments, with
+        <code>pyaps3</code> listed explicitly.</dd>
+    </dl></div>
+  </div>
+
+  <div class="issue fixed">
+    <div class="hd"><span class="tag">P2</span>
+      <span class="ttl">Importing isce3 breaks any CLI that takes flags</span></div>
+    <div class="bd"><dl>
+      <dt>Symptom</dt><dd><code>AttributeError</code> on a partially initialised
+        <code>journal</code> module — but only when the tool is invoked with arguments, never in
+        direct testing.</dd>
+      <dt>Cause</dt><dd>Importing <code>isce3</code> pulls in <code>pyre</code>, whose
+        <code>__init__</code> calls <code>executive.activate()</code> and <strong>parses
+        <code>sys.argv</code> at import time</strong>. Our <code>--config</code> reached pyre's
+        parser.</dd>
+      <dt class="f">Resolution</dt><dd><code>util.clean_argv()</code> / <code>preload_isce3()</code>
+        — scrub argv before the import, restore it after.</dd>
+    </dl></div>
+  </div>
+
+  <div class="issue fixed">
+    <div class="hd"><span class="tag">P3</span>
+      <span class="ttl">h5py / HDF5 version skew warning</span></div>
+    <div class="bd"><dl>
+      <dt>Symptom</dt><dd><code>UserWarning: h5py is running against HDF5 2.2.0 when it was built
+        against 2.1.0</code> on every import.</dd>
+      <dt>Cause</dt><dd>Every conda-forge <code>h5py 3.16.0</code> build declares
+        <code>hdf5 &ge;2.1.0,&lt;3.0a0</code> but was compiled against 2.1.0, while
+        <code>libgdal-hdf5</code> pulls 2.2.0.</dd>
+      <dt class="f">Resolution</dt><dd><strong>Benign — do not chase it.</strong> HDF5 keeps ABI
+        compatibility within a major version. <code>verify.sh</code> round-trips a gzipped
+        complex64 dataset to prove it. Pinning <code>hdf5=2.1</code> conflicts with
+        <code>libgdal-hdf5 3.12.4</code>.</dd>
+    </dl></div>
+  </div>
+
+  <h3>Auxiliary data</h3>
+
+  <div class="issue fixed">
+    <div class="hd"><span class="tag">P4</span>
+      <span class="ttl">NASADEM water mask route returns an all-water mask and exits 0</span></div>
+    <div class="bd"><dl>
+      <dt>Symptom</dt><dd>A mask covering 100% of the scene, with a successful exit status.</dd>
+      <dt>Cause</dt><dd>The SRTMSWBD source 404s. <code>sardem</code> pre-fills its mosaic with
+        255&nbsp;=&nbsp;WATER, skips past every tile that fails, and returns success — a
+        <strong>silent wrong answer</strong>, the worst failure mode of the whole setup.</dd>
+      <dt class="f">Resolution</dt><dd>Derive the mask from orthometric heights instead (see §6),
+        and refuse to emit a mask whose water fraction falls outside a sane band.</dd>
+    </dl></div>
+  </div>
+
+  <div class="issue fixed">
+    <div class="hd"><span class="tag">P5</span>
+      <span class="ttl">A missing PROJ grid turns the datum conversion into a no-op</span></div>
+    <div class="bd"><dl>
+      <dt>Symptom</dt><dd>None visible. The conversion appears to run and the output looks like a
+        DEM.</dd>
+      <dt>Cause</dt><dd>Without <code>us_nga_egm08_25.tif</code>, PROJ falls back to a
+        <em>ballpark</em> vertical transform that applies no geoid at all, returning geoid heights
+        labelled as ellipsoidal.</dd>
+      <dt class="f">Resolution</dt><dd>Probe the transform against a published value before using
+        it — EGM2008 undulation at (0°,&nbsp;0°) is ≈&nbsp;17.2&nbsp;m; measured 17.2251&nbsp;m.
+        Abort if it returns ≈&nbsp;0.</dd>
+    </dl></div>
+  </div>
+
+  <h3>Stale-identity bugs</h3>
+  <p>Four separate failures with one shape: <strong>an output identity that omitted something
+  which changes the output</strong>, so a stale artifact passed an <code>exists()</code> check.
+  Worth recording as a pattern rather than four coincidences.</p>
+
+  <div class="issue fixed">
+    <div class="hd"><span class="tag">P6</span>
+      <span class="ttl">Overlay HTML not namespaced by frequency</span></div>
+    <div class="bd"><dl>
+      <dt>Symptom</dt><dd>A frequency-A run reported the overlay stage as complete without
+        producing anything.</dd>
+      <dt>Cause</dt><dd>Rasters are named <code>ifg_A_HH.*</code> vs <code>ifg_B_HH.*</code> and
+        never collide, but the HTML was a fixed <code>trackG_overlay.html</code>, so the freq-A run
+        found the freq-B page and skipped.</dd>
+      <dt class="f">Resolution</dt><dd>Namespace as <code>trackG_overlay_&lt;freq&gt;_&lt;pol&gt;.html</code>.</dd>
+    </dl></div>
+  </div>
+
+  <div class="issue fixed">
+    <div class="hd"><span class="tag">P7</span>
+      <span class="ttl">Interferogram idempotency ignored the geogrid</span></div>
+    <div class="bd"><dl>
+      <dt>Symptom</dt><dd>After changing the AOI, the interferogram stage skipped — leaving
+        products describing a <em>different patch of ground</em>.</dd>
+      <dt>Cause</dt><dd>Idempotency keyed on filename only; the filename does not encode the
+        geogrid.</dd>
+      <dt class="f">Resolution</dt><dd>Compare each existing raster's origin and pixel size against
+        the pin recorded in <code>stack.json</code> and rebuild on mismatch.</dd>
+    </dl></div>
+  </div>
+
+  <div class="issue fixed">
+    <div class="hd"><span class="tag">P8</span>
+      <span class="ttl">Config literals that go stale: reference raster and ocean probe</span></div>
+    <div class="bd"><dl>
+      <dt>Symptom</dt><dd>A file-not-found for <code>ifg_B_HH.amp.tif</code> during a
+        frequency-A run; separately, an ocean-probe box falling outside the grid — raising
+        <em>after</em> four minutes of DEM and geoid work.</dd>
+      <dt>Cause</dt><dd>Both were literals in the config, set for an earlier frequency and an
+        earlier AOI.</dd>
+      <dt class="f">Resolution</dt><dd>Derive the reference raster from the frequency and
+        polarization actually being processed; clamp the probe to the grid, validate it up front,
+        and downgrade a total miss to a warning.</dd>
+    </dl></div>
+  </div>
+
+  <h3>Scientific correctness</h3>
+
+  <div class="issue fixed">
+    <div class="hd"><span class="tag">P9</span>
+      <span class="ttl">Coherence is degenerate at 1×1 looks</span></div>
+    <div class="bd"><dl>
+      <dt>Symptom</dt><dd><code>coherence: median 1.0, &gt;0.3 1.0, valid 1.0</code> — every pixel
+        perfectly coherent, including open ocean.</dd>
+      <dt>Cause</dt><dd>The boxcar estimator averages over the look box. At 1×1 the box is a single
+        sample, and <code>|a·conj(b)| / √(|a|²·|b|²)</code> collapses to exactly 1.0 for every
+        pixel.</dd>
+      <dt class="f">Resolution</dt><dd>Estimate coherence over a <strong>sliding window centred on
+        each pixel</strong> — the same estimator ISCE2 uses for phsig — whenever the look box has
+        fewer samples than the window. Phase stays per-pixel and the output grid is unchanged.
+        Validated against synthetic pairs of known coherence: true 0.60 → 0.615, true 0.00 → 0.170
+        at a 5×5 window, matching the √π/(2√N) bias of 0.177.</dd>
+    </dl></div>
+  </div>
+
+  <h3>Memory</h3>
+  <p>The workflow stages were first written against a multilooked 6.6&nbsp;Mpx grid. At full 5&nbsp;m
+  resolution the same code sees 677&nbsp;Mpx — 100× more — and every full-grid array becomes a
+  multi-gigabyte allocation.</p>
+
+  <div class="issue fixed">
+    <div class="hd"><span class="tag">P10</span>
+      <span class="ttl">Full-grid arrays accumulating in the water-mask and unwrap stages</span></div>
+    <div class="bd"><dl>
+      <dt>Symptom</dt><dd>OOM kill with no traceback.</dd>
+      <dt>Cause</dt><dd>Water mask held five full-grid arrays at once (≈11.5&nbsp;GB at 677&nbsp;Mpx);
+        unwrap held the raw interferogram, the filtered copy, a needless
+        <code>.copy()</code> of it, phase-sigma coherence and two boolean masks
+        (≈20&nbsp;GB).</dd>
+      <dt class="f">Resolution</dt><dd>Release arrays as soon as they are dead, build derived
+        products in place, and drop an <code>.astype()</code> that was copying an
+        already-correctly-typed raster.</dd>
+    </dl></div>
+  </div>
+
+  <div class="issue fixed">
+    <div class="hd"><span class="tag">P11</span>
+      <span class="ttl">SNAPHU tiling defeated by its own post-processing</span></div>
+    <div class="bd"><dl>
+      <dt>Symptom</dt><dd>OOM <em>immediately</em> at the snaphu call, with no tile output — despite
+        tiling being configured specifically to bound memory.</dd>
+      <dt>Cause</dt><dd>Both <code>single_tile_reoptimize</code> and <code>regrow_conncomps</code>
+        default to <strong>True</strong>, and both run a final pass over the whole grid
+        <em>as a single tile</em>. Tiling kept peak memory at ~3&nbsp;GB right up until the last
+        step, which then asked for ~65&nbsp;GB.</dd>
+      <dt class="f">Resolution</dt><dd>Both set <code>false</code> when tiling, wired through the
+        config (<code>regrow_conncomps</code> was previously not exposed and silently defaulting to
+        True), and the stage now warns if either is enabled alongside tiling.</dd>
+    </dl></div>
+  </div>
+
+  <div class="issue">
+    <div class="hd"><span class="tag">P12</span>
+      <span class="ttl">Disabling those options fragments the unwrapped phase</span></div>
+    <div class="bd"><dl>
+      <dt>Symptom</dt><dd>32 connected components of near-identical size (~1.05&nbsp;Mpx each),
+        largest covering 3.6% of labelled pixels. The untiled run gave 1 component at 98.6%.</dd>
+      <dt>Cause</dt><dd>Component sizes match the tile size, so each component is essentially one
+        tile — the global relabelling step that would merge them is exactly what
+        <code>regrow_conncomps</code> does.</dd>
+      <dt>Status</dt><dd><span class="pill open">Open</span> Each component carries its own
+        arbitrary 2π offset, so only pixels sharing a label are comparable. The fix is
+        <code>snaphu.io.Raster</code> file-backed I/O, which lets the global pass stream from disk
+        instead of RAM.</dd>
+    </dl></div>
+  </div>
+</section>
+
+<section id="limits">
+  <h2><span class="n">8</span>Machine limits</h2>
+  <p>Measured on the build machine (16 cores, 13&nbsp;GB RAM, no NVIDIA GPU), not estimated.</p>
+
+  <h3>SNAPHU memory</h3>
+  <p>Linear at <strong>385 bytes per pixel</strong>, measured across five grid sizes. Note this is
+  the <em>child process</em> — snaphu-py writes temp files and shells out to the snaphu binary, so
+  measuring the Python process alone under-reports by roughly 5×.</p>
+  <div class="tw"><table>
+    <tr><th>Grid</th><th class="num">Mpx</th><th class="num">Peak</th><th class="num">B/px</th><th class="num">Seconds</th></tr>
+    <tr><td>700 × 500</td><td class="num">0.35</td><td class="num">0.128 GB</td><td class="num">392</td><td class="num">3.1</td></tr>
+    <tr><td>1200 × 850</td><td class="num">1.02</td><td class="num">0.368 GB</td><td class="num">387</td><td class="num">11.4</td></tr>
+    <tr><td>1700 × 1200</td><td class="num">2.04</td><td class="num">0.733 GB</td><td class="num">386</td><td class="num">30.2</td></tr>
+    <tr><td>2100 × 1500</td><td class="num">3.15</td><td class="num">1.131 GB</td><td class="num">385</td><td class="num">48.8</td></tr>
+    <tr><td>2600 × 1900</td><td class="num">4.94</td><td class="num">1.773 GB</td><td class="num">385</td><td class="num">78.3</td></tr>
+  </table></div>
+  <p>With tiling, peak tracks <strong>tile size × nproc</strong>, not total grid — 4.94&nbsp;Mpx
+  needs 1.77&nbsp;GB untiled but 0.55&nbsp;GB at 4×4 tiles with 4 processes.</p>
+
+  <h3>Disk, by multilook factor</h3>
+  <p>Downstream interferogram products for a 186 × 89&nbsp;km AOI. The nine full-resolution rasters
+  at 1×1 are what make 5&nbsp;m unwrapping a storage problem as much as a memory one.</p>
+  <div class="tw"><table>
+    <tr><th>Looks</th><th class="num">Grid</th><th class="num">Products</th></tr>
+    <tr><td>1 × 1 (5 m)</td><td class="num">1690 Mpx</td><td class="num">72.4 GiB</td></tr>
+    <tr><td>2 × 2 (10 m)</td><td class="num">423 Mpx</td><td class="num">18.1 GiB</td></tr>
+    <tr><td>4 × 4 (20 m)</td><td class="num">106 Mpx</td><td class="num">4.5 GiB</td></tr>
+    <tr><td>16 × 16 (80 m)</td><td class="num">6.6 Mpx</td><td class="num">0.28 GiB</td></tr>
+  </table></div>
+</section>
+
+<section id="open">
+  <h2><span class="n">9</span>Open issues</h2>
+  <ul>
+    <li><strong>Connected-component fragmentation at scale</strong> (P12) — needs
+      <code>snaphu.io.Raster</code> file-backed I/O so the global relabelling pass can stream from
+      disk. Until then, tiled unwraps above roughly 100&nbsp;Mpx produce per-tile components.</li>
+    <li><strong>Ionospheric correction is not applied.</strong> <code>tec_file</code> is left null,
+      so <code>correct_tec</code> is <code>False</code>. NISAR requires an IMAGEN TEC
+      <em>JSON</em>, not the IONEX format the course downloads, and no downloader ships with
+      <code>nisar</code>. This matters more at L-band than at C-band: range delay scales as
+      <em>K/f²</em>, so the same TEC produces roughly 19× the shift at 1.239&nbsp;GHz versus
+      5.405&nbsp;GHz.</li>
+    <li><strong>No azimuth solid-earth tides.</strong> <code>geocode_corrections.py</code> computes
+      both components and discards the azimuth one.</li>
+    <li><strong>No troposphere in the GSLC path at all</strong> — the term does not appear in
+      <code>gslc.py</code>, <code>geocode_corrections.py</code> or either YAML.</li>
+  </ul>
+</section>
+
+<p class="foot">Environment built and verified on the branch <code>s1-nisar-setup</code>.
+Setup notes: <code>asc/SETUP.md</code> · workflow design: <code>asc/WORKFLOWS.md</code> ·
+scripts: <code>asc/nisar_workflows/</code>.</p>
+
+</main>
+</div>
