@@ -261,6 +261,43 @@ check, so a re-run reprocesses everything. The mechanism already exists in the r
 
 ---
 
+## 7b. Switching site — Nepal GLOF
+
+The AOI moves from Venezuela to a **Nepal GLOF / flash-flood event**. The workflow is
+site-agnostic: ingest derives track, frame, orbit direction, look side, dates, EPSG and the
+pinned geogrid **from the granules themselves**. Nothing about Venezuela is hardcoded in the
+code — only in `configs/venezuela_t162_asc.yaml`.
+
+Use `configs/nepal_glof.yaml` (already in the repo) and set `case_dir`, then `aoi_lonlat` once
+you have looked at the data.
+
+Data: `gs://s1-slc/nepal/nisar/ascending/tile_1/`
+
+```bash
+gsutil -m cp 'gs://s1-slc/nepal/nisar/ascending/tile_1/**/*RSLC*.h5' \
+    <case_dir>/L1_RSLC/
+```
+
+**The science is different, and it changes what matters.** Venezuela was coseismic: the signal was
+deformation, read from unwrapped phase. A GLOF's strongest signatures are **amplitude change**
+(channel scour, new deposits, inundation) and **coherence loss** (surface disturbance between
+passes). Both come out of stages 6–7 and need no unwrapping.
+
+Two consequences:
+
+- **The open unwrap problem (§2) is not blocking for a first look at Nepal.** Run through
+  `watermask` and read amplitude and coherence.
+- **Low coherence along the flood path is the signal, not a defect.** Do not pick the AOI by
+  maximising coherence — that mistake was made on Venezuela and selected quiet terrain 100 km from
+  the rupture. Pick the AOI from what the imagery shows: source lake, flood path, depositional
+  reach.
+
+Also unknown until the granules are inspected: the temporal baseline, whether the pair actually
+brackets the event, and whether frequency B exists. Stage A (`ingest`) reports all of these in
+seconds and costs nothing — run it first.
+
+---
+
 ## 8. Getting running on a new machine
 
 ```bash
@@ -273,15 +310,20 @@ bash asc/env/verify.sh                      # must print ALL CHECKS PASSED
 # 2. credentials — one Earthdata login covers everything
 echo "machine urs.earthdata.nasa.gov login USER password PASS" > ~/.netrc && chmod 600 ~/.netrc
 
-# 3. re-download the granules (L1_RSLC/ is currently empty)
+# 3. get the granules  (L1_RSLC/ is empty in both case dirs)
+#    Nepal:
+gsutil -m cp 'gs://s1-slc/nepal/nisar/ascending/tile_1/**/*RSLC*.h5' \
+  <repo>/case_studies/nepal_glof/L1_RSLC/
+#    Venezuela:
 gsutil -m cp \
   'gs://s1-slc/venezuela/ascending/nisar/tile_1/SLC/NISAR_L1_PR_RSLC_02*_162_A_007_4005_DHDH_A_2026*.h5' \
   <repo>/case_studies/venezuela_t162_asc/L1_RSLC/
 
-# 4. run Track G
+# 4. run Track G  (ingest first -- it is instant and reports what the pair IS)
 cd asc/nisar_workflows
-python run_track_g.py --config configs/venezuela_t162_asc.yaml --list-steps
-python run_track_g.py --config configs/venezuela_t162_asc.yaml --start-step ingest --stop-step overlay
+python run_track_g.py --config configs/nepal_glof.yaml --list-steps
+python run_track_g.py --config configs/nepal_glof.yaml --only ingest
+python run_track_g.py --config configs/nepal_glof.yaml --start-step dem --stop-step watermask
 ```
 
 Steps: `1 ingest · 2 dem · 3 gslc · 4 gridgate · 5 qa · 6 igram · 7 watermask · 8 unwrap ·
