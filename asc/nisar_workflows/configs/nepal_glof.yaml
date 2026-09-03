@@ -232,8 +232,16 @@ igram:
   # samples than the window would (looks_y*looks_x < coherence_window**2), which
   # is the case for every small look setting. Phase is unaffected.
   coherence_window: 5
-  looks_y: 2
-  looks_x: 2
+  # 8 x 8 on frequency A -> 37.8 m range x 35.6 m azimuth, i.e. ~40 m and very
+  # nearly square, because freq A's native ground cell is 4.724 x 4.456 m.
+  # ILN = 0.6918 * 8 * 8 = 44.3, so the coherence bias floor is 0.133 -- low
+  # enough that a real coherence drop along the flood path is unambiguous.
+  #
+  # THIS IS FREQUENCY-A SPECIFIC. Freq B's native cell is 37.79 x 4.456 m
+  # (8.49:1), so 8 x 8 there would give 302 x 36 m. If you switch to freq B,
+  # use roughly 1:8 -- e.g. 1 x 8.
+  looks_y: 8
+  looks_x: 8
 
   # Streaming block height in GSLC rows. Multiple of BOTH looks_y (16) and the
   # 512-row HDF5 chunking, so look boxes never straddle a block boundary and

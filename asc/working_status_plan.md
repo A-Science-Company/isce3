@@ -334,6 +334,52 @@ seconds and costs nothing — run it first.
 
 ---
 
+## 7c. The VM — read this before running anything
+
+Environment is installed and `verify.sh` prints ALL CHECKS PASSED. But the machine is
+**3 GB RAM / 2 cores / 389 GB disk**, which is the opposite balance to what this workflow needs.
+
+| | VM | laptop where the numbers below were measured |
+|---|---|---|
+| RAM | **3 GB** (+8 GB swapfile) | 13 GB |
+| cores | 2 | 16 |
+| free disk | **389 GB** | 26 GB |
+
+Measured peaks from real runs:
+
+| stage | peak RAM |
+|---|---|
+| watermask, 677 Mpx grid | **9.68 GB** |
+| unwrap, 169 Mpx, after the array fixes | ~2.0 GB + snaphu |
+| snaphu | 385 bytes/pixel |
+| GSLC geocode | 830 MB |
+
+So **only the GSLC stage fits in 3 GB.** Watermask and unwrap do not, at any useful AOI. Swap
+gets the conda solve through but will not carry a 9 GB array — snaphu's access pattern in
+particular is random enough that swapping it is close to hopeless.
+
+The disk, though, is exactly what was missing: 389 GB makes Track R's ~300 GB of rdr2geo/geo2rdr
+scratch feasible for the first time.
+
+**Recommendation: resize before processing.** `n2-standard-8` (8 vCPU / 32 GB) clears every
+ceiling hit so far; the disk persists across a machine-type change. Until then, restrict runs to
+small AOIs and expect watermask and unwrap to fail.
+
+### The environment is not bit-identical to the laptop
+
+Same `isce3_env.yml`, different resolution — the yml does not pin hdf5:
+
+| | laptop | VM |
+|---|---|---|
+| hdf5 | 2.2.0 | **1.14.6** |
+| h5py build | `nompi_py312ha829cd9_102` | `nompi_py312ha4f8f14_102` |
+
+Both work. The VM is arguably cleaner: its h5py pins `hdf5 >=1.14.6,<1.14.7` and got exactly
+that, so it shows none of the version-skew warning the laptop does. Worth knowing when comparing
+results across machines, and worth pinning if bit-reproducibility ever matters.
+
+---
+
 ## 8. Getting running on a new machine
 
 ```bash
