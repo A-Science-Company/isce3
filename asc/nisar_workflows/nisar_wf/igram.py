@@ -211,14 +211,16 @@ def form_pair(ref_path: Path, sec_path: Path, freq: str, pol: str,
         est = blk * nx * 8 * 2 + blk * nx * 16
         log.info(f"  streaming {ny} x {nx} in {blk}-row blocks "
                  f"(~{human_bytes(est)} peak per block)")
-        if ry * rx >= _MIN_COH_SAMPLES:
+        if ry * rx >= coherence_window ** 2:
             log.info(f"  coherence: boxcar over the {ry} x {rx} look box "
                      f"({ry * rx} samples)")
         else:
             log.info(f"  coherence: {coherence_window} x {coherence_window} SLIDING "
                      f"window ({coherence_window ** 2} samples) -- the {ry} x {rx} "
-                     f"look box is too small to estimate from (a 1-sample box gives "
-                     f"1.0 identically). Phase stays per-pixel; the grid is unchanged.")
+                     f"look box has only {ry * rx} sample(s), whose bias floor is "
+                     f"{(3.14159265**0.5)/(2*(ry*rx)**0.5):.3f} vs "
+                     f"{(3.14159265**0.5)/(2*coherence_window):.3f} for the window. "
+                     f"Grid unchanged; phase stays per-pixel.")
 
         t0 = time.time()
         n_blocks = (oy * ry + blk - 1) // blk
@@ -268,7 +270,7 @@ def form_pair(ref_path: Path, sec_path: Path, freq: str, pol: str,
             cnt = blk2(joint.astype(np.float32))
             den = np.sqrt(p1 * p2)
             with np.errstate(invalid="ignore", divide="ignore"):
-                if ry * rx >= _MIN_COH_SAMPLES:
+                if ry * rx >= coherence_window ** 2:
                     coh = np.where((den > 0) & (cnt > 0), np.abs(num) / den, np.nan)
                 else:
                     # look box too small to estimate coherence from -- use a
@@ -426,7 +428,12 @@ def _stale_against_pin(cfg, want, log) -> str | None:
     return "; ".join(bad) if bad else None
 
 
-_MIN_COH_SAMPLES = 4   # below this the boxcar estimator is degenerate
+# Use the boxcar (look-box) estimator only when the box has at least as many
+# samples as the sliding window would give. Otherwise the sliding window is
+# strictly the better estimator: the multilook coherence bias floor is
+# sqrt(pi)/(2 sqrt(N)), so N=1 -> 1.000 (degenerate), N=4 -> 0.443, N=25 -> 0.177.
+# Picking the larger N is always right; the output grid is unchanged either way
+# because the sliding-window result is decimated onto the multilook grid.
 
 
 def _sliding_coherence(a, b, joint, win: int):

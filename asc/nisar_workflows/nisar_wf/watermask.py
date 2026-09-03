@@ -216,6 +216,22 @@ def run(cfg: Config, log: Logger, force: bool = False, dry_run: bool = False) ->
         valid &= ref != ref_nodata
     log.info(f"  in-swath (valid) pixels: {valid.mean() * 100:.2f}%")
 
+    # Peak-memory guard. Every full-grid array here is H*W; at 1x1 looks that is
+    # ~677 Mpx, so ref(f32) + valid(bool) + dem(f32) + n_grid(f32) + ortho(f32)
+    # is ~11.5 GB and the stage is OOM-killed. It was written against the 6.6 Mpx
+    # multilooked grid where all of that is under 200 MB.
+    #
+    # `ref` is only needed for the amplitude method and inland-water refinement.
+    # Drop it now when neither is in play, and build ortho in place.
+    _need_ref = (wm.method == "amplitude") or wm.include_inland
+    if not _need_ref:
+        del ref
+        ref = None
+        log.info("  released the reference raster (not needed by this method)")
+
+    # Validate the probe NOW, before four minutes of DEM and geoid work.
+    _probe_box = _clamp_probe(wm.ocean_probe, T, H, W, log) if wm.ocean_probe else None
+
     # ---- DEM onto that grid ---------------------------------------------
     t0 = time.time()
     dem = np.full((H, W), np.nan, dtype="float32")
@@ -229,13 +245,23 @@ def run(cfg: Config, log: Logger, force: bool = False, dry_run: bool = False) ->
     # ---- ellipsoidal -> orthometric, with the anti-fallback guard --------
     tr = _geoid_transformer(wm.geoid_crs, log)
     n_grid = _geoid_undulation(T, CRS, H, W, wm.block_rows, tr, log)
-    ortho = dem - n_grid
+    # Capture the stats BEFORE freeing -- the provenance sidecar reports them.
+    _n_min, _n_max = float(np.nanmin(n_grid)), float(np.nanmax(n_grid))
+    # In place: `dem` becomes orthometric. Saves one full-grid float32 array,
+    # and n_grid is released immediately after.
+    dem -= n_grid
+    del n_grid
+    ortho = dem                      # alias, not a copy
     log.info(f"  orthometric H: {np.nanmin(ortho):.1f} .. {np.nanmax(ortho):.1f} m")
 
     # ---- the mask --------------------------------------------------------
     void = ~np.isfinite(dem)
     if wm.method == "dem_orthometric":
-        water = (ortho <= wm.sea_level_margin_m) | void      # course semantics: sea OR void
+        # `void |=` rather than `water = ... | void` avoids one more full-grid
+        # temporary; void is reused as the water mask from here.
+        np.less_equal(ortho, wm.sea_level_margin_m, out=void, where=np.isfinite(ortho))
+        void |= ~np.isfinite(ortho)
+        water = void                                          # course semantics: sea OR void
     elif wm.method == "amplitude":
         water = _amplitude_water(ref, valid, wm, log) | void
     else:
@@ -258,8 +284,8 @@ def run(cfg: Config, log: Logger, force: bool = False, dry_run: bool = False) ->
             "  An all-land or all-water mask is the signature of a broken source --\n"
             "  it is what the NASADEM route produced silently. Refusing to write it."
         )
-    if wm.ocean_probe:
-        _assert_ocean(mask, T, wm.ocean_probe, log)
+    if wm.ocean_probe and _probe_box is not None:
+        _assert_ocean(mask, T, _probe_box, log)
 
     prof.update(dtype="uint8", count=1, nodata=OUTSIDE, compress="deflate",
                 tiled=True, zlevel=6)
@@ -280,13 +306,13 @@ def run(cfg: Config, log: Logger, force: bool = False, dry_run: bool = False) ->
                               "include_inland": wm.include_inland},
                   started=started,
                   extra={"water_fraction": round(float(frac), 6),
-                         "geoid_N_min": round(float(n_grid.min()), 3),
-                         "geoid_N_max": round(float(n_grid.max()), 3),
+                         "geoid_N_min": round(_n_min, 3),
+                         "geoid_N_max": round(_n_max, 3),
                          "valid_fraction": round(float(valid.mean()), 6)})
     return Result(stage="watermask", outputs=[str(out_path)],
                   metrics={"water_fraction": round(float(frac), 6),
-                           "geoid_N_range_m": [round(float(n_grid.min()), 2),
-                                               round(float(n_grid.max()), 2)]},
+                           "geoid_N_range_m": [round(_n_min, 2),
+                                               round(_n_max, 2)]},
                   notes=[f"{frac * 100:.2f}% water over the swath"])
 
 
@@ -342,6 +368,34 @@ def _inland_water(amp, ortho, valid, wm, log):
     log.info(f"  inland water: {cand.sum()} candidate px in {n} blobs -> "
              f"{cleaned.sum()} px after dropping blobs < {wm.inland_min_area_px} px")
     return cleaned
+
+
+def _clamp_probe(box, transform, height, width, log):
+    """Intersect the probe box with the grid. Returns None if they do not overlap.
+
+    The probe is a config literal in projected units, so it goes stale the moment
+    geogrid.aoi_lonlat changes -- and it used to raise AFTER the DEM resample and
+    geoid pass, i.e. four minutes into the stage. Clamp here, check early, and
+    downgrade a total miss to a warning: an out-of-grid probe means the check
+    cannot run, not that the mask is wrong.
+    """
+    gx0 = transform.c
+    gy1 = transform.f
+    gx1 = gx0 + width * transform.a
+    gy0 = gy1 + height * transform.e
+    x0, y0, x1, y1 = box
+    ix0, ix1 = max(min(x0, x1), min(gx0, gx1)), min(max(x0, x1), max(gx0, gx1))
+    iy0, iy1 = max(min(y0, y1), min(gy0, gy1)), min(max(y0, y1), max(gy0, gy1))
+    if ix0 >= ix1 or iy0 >= iy1:
+        log.warn(f"  ocean_probe {box} does not overlap the grid "
+                 f"x[{min(gx0,gx1):.0f},{max(gx0,gx1):.0f}] "
+                 f"y[{min(gy0,gy1):.0f},{max(gy0,gy1):.0f}] -- SKIPPING the check. "
+                 f"Update watermask.ocean_probe for this AOI to re-enable it.")
+        return None
+    if (ix0, iy0, ix1, iy1) != (min(x0,x1), min(y0,y1), max(x0,x1), max(y0,y1)):
+        log.warn(f"  ocean_probe clamped to the grid: "
+                 f"x[{ix0:.0f},{ix1:.0f}] y[{iy0:.0f},{iy1:.0f}]")
+    return (ix0, iy0, ix1, iy1)
 
 
 def _assert_ocean(mask, transform, box, log):

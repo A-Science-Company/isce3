@@ -206,8 +206,12 @@ igram:
   # so equal looks are correct here. 16 x 16 -> 80 x 80 m, matching the freq-B
   # product's analysis scale so the two bands are directly comparable.
   # (The asymmetric 16 x 2 above was for freq B's 40 x 5 m posting.)
-  looks_y: 1
-  looks_x: 1
+  # Sliding-window size for coherence. Used whenever the look box has FEWER
+  # samples than the window would (looks_y*looks_x < coherence_window**2), which
+  # is the case for every small look setting. Phase is unaffected.
+  coherence_window: 5
+  looks_y: 2
+  looks_x: 2
 
   # Streaming block height in GSLC rows. Multiple of BOTH looks_y (16) and the
   # 512-row HDF5 chunking, so look boxes never straddle a block boundary and
@@ -247,7 +251,9 @@ watermask:
   # this comes out >95% water -- the check the broken NASADEM route would fail.
   # Keep it well inside the swath: the swath is a rotated parallelogram in a
   # north-up bounding box, so boxes near the NE corner are mostly nodata.
-  ocean_probe: [600000.0, 1200000.0, 680000.0, 1260000.0]
+  # Verified 100% water against the orthometric DEM for the CURRENT aoi_lonlat.
+  # Must lie inside the grid; the stage now clamps and warns instead of failing.
+  ocean_probe: [580000.0, 1176000.0, 600000.0, 1196000.0]
   min_water_fraction: 0.01
   max_water_fraction: 0.95
 
@@ -310,10 +316,23 @@ unwrap:
   # snaphu uses to resolve the integer 2*pi offset between neighbouring tiles.
   # Too small and adjacent tiles settle on offsets differing by a cycle, giving
   # a seam that can masquerade as a fault. 200 px = 1 km at 5 m posting.
-  ntiles: [20, 40]
+  ntiles: [10, 17]
   tile_overlap: 200
-  nproc: 8
-  single_tile_reoptimize: true
+  nproc: 4
+  # MUST be false whenever ntiles != [1,1] on a memory-bounded box. snaphu-py:
+  # "after unwrapping with multiple tiles, an additional post-processing
+  # unwrapping step is performed to re-optimize the unwrapped phase using a
+  # SINGLE tile" -- i.e. it undoes the entire memory benefit of tiling in the
+  # last step. At 169 Mpx that final pass needs ~65 GB (385 B/px measured).
+  # Cost of false: conncomp labels come from the tiled solution and stitching,
+  # not a global re-solve, so seams matter more. regrow_conncomps then applies.
+  single_tile_reoptimize: false
+  # Also false: snaphu regrows conncomp labels "using a single tile" too, so it
+  # carries the same full-grid memory cost (cheaper -- labelling, not a re-solve
+  # -- but still unbounded by tile size). CAVEAT: with both off, conncomp labels
+  # come from the tiled solution and its stitching, so check seams before
+  # trusting component boundaries near the fault.
+  regrow_conncomps: false
 
   # Applied by ZEROING the interferogram, not via snaphu's mask= argument --
   # that is what the course does, and switching changes conncomp labelling.

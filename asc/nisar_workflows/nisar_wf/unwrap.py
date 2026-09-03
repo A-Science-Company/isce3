@@ -523,7 +523,12 @@ def unwrap_pair(cfg: Config, log: Logger, ref: str, sec: str) -> dict:
     # ---- read the interferogram -----------------------------------------
     ds = gdal.Open(str(p["igram"]))
     gt, proj = ds.GetGeoTransform(), ds.GetProjection()
-    ifg = ds.GetRasterBand(1).ReadAsArray().astype(np.complex64)
+    # astype() on an already-complex64 raster is a full-size copy for nothing.
+    # At 677 Mpx that is 5.4 GB of pure waste on top of the 5.4 GB read.
+    _band = ds.GetRasterBand(1)
+    ifg = _band.ReadAsArray()
+    if ifg.dtype != np.complex64:
+        ifg = ifg.astype(np.complex64)
     ds = None
     H, W = ifg.shape
     log.info(f"  {p['igram'].name}: {H} x {W}")
@@ -544,6 +549,10 @@ def unwrap_pair(cfg: Config, log: Logger, ref: str, sec: str) -> dict:
              f"{fmt_s(time.time() - t0)}")
     _write_tif(p["filt"], filt, gt, proj, gdal.GDT_CFloat32)
     log.info(f"    -> {p['filt'].name}")
+    # `ifg` is dead from here -- everything downstream works off `filt`. At
+    # 677 Mpx this is 5.4 GB; holding it until the function returns is what
+    # pushed the stage into the OOM killer.
+    del ifg
 
     # ---- 2. phase-sigma coherence FROM THE FILTERED IFG ------------------
     t0 = time.time()
@@ -593,11 +602,15 @@ def unwrap_pair(cfg: Config, log: Logger, ref: str, sec: str) -> dict:
     # ---- 4. zero the interferogram at invalid ----------------------------
     invalid = zero_amp | water
     masked_frac = float(invalid.mean())
+    _n_zero, _n_water = int(zero_amp.sum()), int(water.sum())
     log.info(f"  masked pixels: {int(invalid.sum())} ({masked_frac * 100:.2f}% of the grid; "
-             f"{int(zero_amp.sum())} outside the swath, {int(water.sum())} water)")
+             f"{_n_zero} outside the swath, {_n_water} water)")
+    del zero_amp, water
 
-    ifg_msk = filt.copy()
-    ifg_msk[invalid] = 0.0 + 0.0j
+    # In place. `filt` has already been written to disk, so mutating it costs
+    # nothing and saves another full-grid complex64 copy.
+    filt[invalid] = 0.0 + 0.0j
+    ifg_msk = filt          # alias, not a copy
     # phsig is deliberately NOT zeroed at `invalid` -- the course leaves the
     # correlation untouched and hands snaphu zero-magnitude complex paired with a
     # nonzero correlation. Faithful; changing it changes conncomp labelling.
@@ -612,6 +625,13 @@ def unwrap_pair(cfg: Config, log: Logger, ref: str, sec: str) -> dict:
     if tuple(uc.ntiles) != (1, 1):
         kwargs["tile_overlap"] = uc.tile_overlap
         kwargs["single_tile_reoptimize"] = uc.single_tile_reoptimize
+        kwargs["regrow_conncomps"] = uc.regrow_conncomps
+        if uc.single_tile_reoptimize or uc.regrow_conncomps:
+            log.warn(f"  single_tile_reoptimize={uc.single_tile_reoptimize} "
+                     f"regrow_conncomps={uc.regrow_conncomps}: snaphu will make a "
+                     f"FULL-GRID single-tile pass after tiling, which needs memory "
+                     f"proportional to the WHOLE grid (~385 B/px measured), not the "
+                     f"tile. This is what tiling exists to avoid.")
     if uc.scratchdir:
         sd = Path(uc.scratchdir)
         if not sd.is_absolute():

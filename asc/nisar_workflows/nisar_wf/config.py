@@ -483,6 +483,10 @@ class UnwrapConfig:
     tile_overlap: int = 0
     nproc: int = 1
     single_tile_reoptimize: bool = True
+    #: snaphu regrows conncomp labels "using a single tile" after tiled
+    #: unwrapping. Same full-grid memory exposure as single_tile_reoptimize,
+    #: though cheaper (labelling, not a network-flow re-solve).
+    regrow_conncomps: bool = True
     water_mask: bool = True
     water_max_fraction: float = 0.60
     scratchdir: str | None = None
