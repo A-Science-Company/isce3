@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prove isce3_env and dolphin_env actually work.
+# Prove isce3_env works. dolphin_env is checked only if it exists.
 #   bash asc/env/verify.sh
 # Run from anywhere EXCEPT <repo>/python/packages -- that directory contains
 # source isce3/ and nisar/ trees which shadow the installed packages.
@@ -74,10 +74,23 @@ conda run --no-capture-output -n isce3_env python \
   "$(dirname "$0")/../nisar_workflows/tools/apply_patches.py" --check || fail=1
 
 hr "isce3_env CLIs"
-conda run --no-capture-output -n isce3_env bash -lc \
+# bash -c, NOT bash -lc. A LOGIN shell re-reads /etc/profile and ~/.bashrc,
+# which re-activates the BASE env and drops isce3_env's bin from PATH -- so
+# every CLI reports MISSING even though it is installed. That is exactly what
+# happened inside the Docker build, where the login shell activates base.
+conda run --no-capture-output -n isce3_env bash -c \
   'for c in s1_cslc.py s1_geocode_stack.py burst2stack eof sardem; do
      printf "%-22s %s\n" "$c" "$(command -v $c || echo MISSING)"
    done' || fail=1
+
+# dolphin_env is OPTIONAL. It carries the time-series stack (dolphin, mintpy)
+# and is a separate concern from pair-wise interferometry -- the NISAR image
+# deliberately does not install it, and neither does any machine that only
+# needs Track G/R. Absence is reported, never a failure.
+if ! conda env list | awk '{print $1}' | grep -qx dolphin_env; then
+  hr "dolphin_env"
+  echo "NOT PRESENT -- skipping (optional; only needed for time-series work)"
+else
 
 hr "dolphin_env"
 conda run --no-capture-output -n dolphin_env python - <<'PY' || fail=1
@@ -93,7 +106,13 @@ print("numpy / scipy     ", numpy.__version__, scipy.__version__)
 PY
 
 hr "dolphin CLI"
-conda run --no-capture-output -n dolphin_env dolphin config --help 2>&1 | head -5 || fail=1
+# Capture THEN trim. Piping conda run straight into `head` makes head close the
+# pipe early, the child takes SIGPIPE, and `set -o pipefail` turns that into a
+# spurious failure (exit 120). Racy -- it only fires when the output exceeds the
+# pipe buffer, which is why this passed intermittently.
+_dolphin_help="$(conda run --no-capture-output -n dolphin_env dolphin config --help 2>&1)" || fail=1
+printf '%s\n' "$_dolphin_help" | head -5
+fi
 
 hr "result"
 if [ "$fail" -eq 0 ]; then echo "ALL CHECKS PASSED"; else echo "SOMETHING FAILED (see above)"; fi
