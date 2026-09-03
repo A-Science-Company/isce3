@@ -13,6 +13,7 @@ Companion documents, all in this repo:
 | `asc/docs/nisar-environment-setup.html` | the same, formatted for Confluence |
 | `asc/WORKFLOWS.md` | 3045-line workflow architecture and execution plan |
 | `asc/nisar_workflows/README.md` | the stage contract and how to add a stage |
+| `asc/nisar_workflows/configs/_template.yaml` | copy this for any new AOI |
 
 ---
 
@@ -56,7 +57,7 @@ The case study is a **coseismic pair over Venezuela**:
 
 ### Open
 
-1. **Unwrap fragmentation (blocking).** The tiled unwrap produced **32 connected components of
+1. **Unwrap fragmentation** (not blocking RSLC work — see §3). The tiled unwrap produced **32 connected components of
    near-identical ~1.05 Mpx size** — that is the tile grid, not geophysics. Largest holds 3.6% of
    labelled pixels; the untiled 16×16 run gave 1 component at 98.6%. Each component carries its own
    arbitrary 2π offset, so **only pixels sharing a label are comparable** and the unwrapped field
@@ -71,13 +72,20 @@ The case study is a **coseismic pair over Venezuela**:
 Ordered so each step produces something checkable. Steps 1–5 are the user's; step 0 is inserted
 because comparing a fragmented field would measure our bug rather than the tracks.
 
-**0. Fix the Track G unwrap.** Use `snaphu.io.Raster` file-backed I/O so the global
-connected-component pass can stream from disk. Done when one component covers a large majority
-of valid pixels.
+> **CURRENT PRIORITY: get RSLC coregistration running (step 1).** The science —
+> interpreting deformation or flood signatures — comes *after* the pipeline is automated.
+> Treat steps 2–4 as deferred, and do not spend time on scientific interpretation of any
+> single result until the batch process works end to end.
 
-**1. Track R — RSLC coregistration and interferogram.** `python -m nisar.workflows.insar`. This
-is the classic reference-scene chain in *radar coordinates* at native resolution — the direct
-analogue of the ISCE2 Sentinel-1 workflow. See §4.
+**1. Track R — RSLC coregistration and interferogram. ← START HERE.**
+`python -m nisar.workflows.insar`. The classic reference-scene chain in *radar coordinates* at
+native resolution — the direct analogue of the ISCE2 Sentinel-1 workflow. See §4 for what it
+costs and why the reference image is never resampled.
+
+**0. Fix the Track G unwrap** — *deferred, and not blocking Track R.* The tiled unwrap fragments
+into per-tile connected components; the fix is `snaphu.io.Raster` file-backed I/O so the global
+pass can stream from disk. Needed before Track G and Track R unwrapped phase can be compared, but
+nothing in step 1 depends on it.
 
 **2. Atmospheric and ionospheric corrections on both tracks.** See §5. Note up front: most of
 these are **InSAR-only**, so "both tracks" is not achievable as stated.

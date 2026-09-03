@@ -1,0 +1,446 @@
+# =====================================================================
+# Track G (GSLC) run configuration -- TEMPLATE
+# =====================================================================
+# Copy this file, rename it for the site, and change ONLY the fields marked
+# "CHANGE ME". Everything else was chosen and justified on a real pair and is
+# a sensible default anywhere.
+#
+#     cp configs/_template.yaml configs/<site>.yaml
+#     $EDITOR configs/<site>.yaml            # case_name, case_dir
+#     mkdir -p <case_dir>/L1_RSLC && <copy the granules there>
+#     python run_track_g.py --config configs/<site>.yaml --only ingest
+#
+# NOTHING ABOUT A SITE IS HARDCODED IN THE CODE. Stage A (ingest) reads the
+# granules and derives track, frame, orbit direction, look side, acquisition
+# dates, the UTM zone (EPSG) and the pinned output geogrid from the products
+# themselves. Switching site is a config change, never a code change.
+#
+# ---------------------------------------------------------------------
+# THE ORDER TO WORK IN
+# ---------------------------------------------------------------------
+# 1. ingest             instant, metadata only. Reports what the pair IS:
+#                       track/frame, ascending or descending, look side,
+#                       temporal baseline, which frequencies and pols exist,
+#                       grid dimensions. Run this FIRST, always -- it costs
+#                       nothing and tells you whether the rest is worth doing.
+# 2. dem                a few minutes
+# 3. gslc               the long one. Sized by aoi x posting, NOT by granule
+#                       size -- see "sizing" below.
+# 4. gridgate           instant. MUST print ALIGNED; it is the proof that the
+#                       two dates share a grid, which is what makes them
+#                       coregistered.
+# 5-7. qa, igram, watermask
+# 8-9. unwrap, overlay
+#
+# Run frequency B before committing to frequency A. Freq B is the same swath
+# and the same azimuth sampling with ~8x fewer range samples, so it exercises
+# the whole pipeline at roughly 1/8 the cost.
+#
+# ---------------------------------------------------------------------
+# SIZING -- read before setting posting, looks or aoi
+# ---------------------------------------------------------------------
+# Measured, not estimated:
+#
+#   snaphu memory        385 bytes/pixel, linear. With tiling, peak tracks
+#                        TILE SIZE x nproc, not the total grid.
+#   downstream products  ~46 bytes/pixel across the nine rasters a pair
+#                        produces. At 1x1 looks over a 186 x 89 km AOI that
+#                        is 72 GiB; at 2x2 it is 18 GiB.
+#   GSLC output          (w x h) x 9 bytes per date per pol, uncompressed;
+#                        compresses ~2x in practice.
+#
+# So: aoi_area / posting^2 sets everything downstream. Decide posting and AOI
+# together, against the disk you actually have.
+#
+# ---------------------------------------------------------------------
+# THREE MISTAKES ALREADY MADE -- do not repeat them
+# ---------------------------------------------------------------------
+# * DO NOT set looks to reduce coregistration cost. Looks are consumed at
+#   crossmul, which runs AFTER every coregistration stage. They change the
+#   interferogram, never the geocoding or resampling cost.
+# * DO NOT enable single_tile_reoptimize or regrow_conncomps alongside
+#   tiling. Both run a full-grid single-tile pass that undoes the entire
+#   memory benefit of tiling. See the unwrap section.
+# * DO NOT pick an AOI from a summary statistic. On the first case study the
+#   AOI was chosen by maximising coherence and landed 100 km from the signal.
+#   Start with null (full frame), then choose from what the imagery shows.
+# ---------------------------------------------------------------------
+
+# CHANGE ME -- short slug; names the run in logs and provenance
+case_name: CHANGE_ME
+# CHANGE ME -- absolute path. Granules go in <case_dir>/L1_RSLC/ ;
+# products are written alongside them.
+case_dir: /CHANGE/ME/case_studies/CHANGE_ME
+
+# out_root: null  ->  write products alongside the granules, in case_dir:
+#   stack.json  cfg/  L2_GSLC/  aux/dem/  qa/  logs/  provenance/  scratch/
+out_root: null
+
+# Empty -> auto-discover NISAR_L1_*RSLC*.h5 in case_dir and sort by acquisition
+# date (earliest becomes the reference). List paths explicitly to pin the stack.
+granules: []
+
+# ---------------------------------------------------------------------
+# What to process
+# ---------------------------------------------------------------------
+# FREQUENCY B FIRST. It is the same swath and the same azimuth sampling as
+# freq A but 8x fewer range samples (6582 vs 52649), so it exercises the entire
+# pipeline end to end at roughly 1/8 the cost. Switch to [A] -- or [A, B] -- once
+# the workflow is trusted. Note freq A at 5 m posting is a ~29 GB/pol output.
+frequencies: [A]
+
+# HH only to start. HV is present in both granules and both frequencies; adding
+# it here doubles output size and geocoding time.
+polarizations: [HH]
+
+# ---------------------------------------------------------------------
+# The PINNED output geogrid -- shared by every date
+# ---------------------------------------------------------------------
+# This is the single highest-risk parameter block in the whole workflow.
+# Leaving a posting blank makes ISCE3 inherit the DEM's ~30 m spacing for a
+# COMPLEX SLC, which irreversibly decimates it. The config layer rejects that.
+geogrid:
+  # null -> derive UTM/polar zone from the AOI centroid via
+  # nisar.workflows.dumpconfig.point_to_epsg. For this AOI that yields 32619
+  # (UTM zone 19N). Pin it explicitly if you ever want to force a zone.
+  epsg: null
+
+  # Corners are snapped OUTWARD to a multiple of this many metres by stage A,
+  # then written as absolute top_left/bottom_right into every runconfig.
+  # 1000 m divides evenly by 5, 8, 10, 20, 25, 40 and 50, so freq A and freq B
+  # grids nest exactly and the corner coordinates stay readable.
+  snap: 1000.0
+
+  # Extra padding beyond the footprint union, in metres, applied before snapping.
+  margin_m: 0.0
+
+  # AOI as [west, south, east, north] in degrees. Output grid = this box
+  # INTERSECTED with the granule footprint. Leave null for the full frame.
+  #
+  # NOT a crop of the RSLC and never needs to be: gslc.py iterates geogrid
+  # blocks via rdr_geo_block_generator and reads only rslc_dataset[rdr_blk_slice],
+  # so a smaller grid reads less of the 24.5 GB granule automatically. Same
+  # semantics as the course's bbox_wsen in 2.1/utils.py.
+  #
+  # Chosen from the freq-B products already on disk: of all 60x60 km boxes with
+  # >=85% land, this one had the best coherence -- median 0.632 (scene-wide is
+  # 0.432), 78.6% above 0.5, 92.9% land. Western massif, inland of the coast.
+  # At 5 m: 12000 x 12000 px, 2.41 GiB for the pair (HH only, uncompressed).
+  # OPTIONAL -- [west, south, east, north] in degrees, INTERSECTED with the
+  # granule footprint. null = the full frame.
+  #
+  # LEAVE null FOR THE FIRST RUN. Process the full frame at frequency B, look
+  # at the result, and only then narrow. This is NOT a crop of the RSLC and
+  # never needs to be: gslc.py reads only the radar slice feeding each output
+  # block, so a smaller output grid reads less of the granule automatically.
+  aoi_lonlat: null
+
+  # Output pixel spacing in metres, per frequency. Positive; ISCE3 applies the
+  # sign for the northing axis itself.
+  posting:
+    # Freq A: near-isotropic native ground resolution (~4.2-5.7 m range,
+    # ~4.46 m azimuth), so 5 m square is the natural choice.
+    A: {x: 5.0, y: 5.0}
+
+    # Freq B is deliberately ANISOTROPIC. Range bandwidth is only 5 MHz, giving
+    # ~34-46 m ground range, while azimuth is unchanged at ~4.46 m. For this
+    # near-polar ascending pass the range direction lies close to easting and
+    # azimuth close to northing, so the resolution cell's bounding box is about
+    # 40 m in x and 13 m in y. Posting 40 x 5 m therefore samples the complex
+    # signal without aliasing it. Going to y: 10.0 halves the output (1.8 GB
+    # instead of 3.3 GB per pol) and still clears Nyquist, but with far less
+    # headroom -- change it only deliberately.
+    B: {x: 40.0, y: 5.0}
+
+  # Geometry cubes (incidence, LOS, ...) written into the product metadata.
+  # Coarse on purpose: these are smooth fields, unrelated to image posting.
+  radar_grid_cube:
+    posting: 1000.0
+    heights: [-500.0, 0.0, 500.0, 1000.0, 1500.0, 2000.0, 3000.0]
+
+# ---------------------------------------------------------------------
+# DEM staging (stage B)
+# ---------------------------------------------------------------------
+dem:
+  # NISAR: native WGS84 ELLIPSOIDAL heights, which is what ISCE3 geocoding
+  # requires. Hard precondition: a free NASA Earthdata account with an entry
+  # for urs.earthdata.nasa.gov in ~/.netrc. sardem enforces this before any
+  # network call, so a missing credential fails instantly rather than midway.
+  source: NISAR
+
+  # Copernicus GLO-30 fallback. Delivered as EGM2008 and converted to WGS84 by
+  # sardem, so it is also ellipsoidal -- but ocean arrives as nodata == 0 by
+  # design on this route, so ocean == 0 there is NOT a datum bug.
+  fallback: COP
+
+  # null -> <out_root>/aux/dem/dem_<case_name>.tif
+  path: null
+
+  # Degrees of padding around the AOI (which already includes the snapped UTM
+  # box, not just the footprint). ~0.1 deg is about 11 km -- comfortably more
+  # than the 1 km snap, and enough slack for terrain-induced geolocation shift.
+  buffer_deg: 0.1
+
+  # null -> sardem's own cache location
+  cache_dir: null
+
+# ---------------------------------------------------------------------
+# GSLC generation (stage G1). Keys map 1:1 onto the installed gslc schema.
+# ---------------------------------------------------------------------
+gslc:
+  # MUST stay true. Flattening strips the range carrier phase; leaving it in is
+  # irreversible downstream and every interferogram would carry a huge ramp.
+  # The config layer refuses to run with this set false.
+  flatten: true
+
+  # Geolocation-only for GSLC, but it differs between the two dates, so leaving
+  # it on removes a few-cm relative bias.
+  solid_earth_tides: true
+
+  data_type: complex64_zero_mantissa
+  compression_enabled: true
+  compression_level: 1          # 1 = fastest; these rasters are large
+  chunk_size: [512, 512]
+  shuffle: true
+  fs_strategy: page
+  fs_page_size: 4194304
+
+  # Geocoding block size in output pixels. 1024 x 1024 complex64 is 8 MiB per
+  # block, which is comfortable against ~4 GB free RAM.
+  blocksize: {x: 1024, y: 1024}
+
+  geo2rdr: {threshold: 1.0e-8, maxiter: 25}
+
+  # No CUDA device on this machine.
+  gpu_enabled: false
+
+  # Keep ISCE3 from attempting its own DEM download; stage B owns the DEM.
+  internet_access: false
+
+  debug_switch: false
+
+  # Optional per-date ancillary overrides, keyed by YYYYMMDD. Left empty, the
+  # orbit and TEC embedded in the RSLC are used.
+  #   orbit_files: {"20260613": /path/to/orbit.xml}
+  #   tec_files:   {"20260613": /path/to/tec.json}
+  orbit_files: {}
+  tec_files: {}
+
+# ---------------------------------------------------------------------
+# QA (decimated reads only -- never loads a full raster)
+# ---------------------------------------------------------------------
+qa:
+  enabled: true
+  max_pixels: 2000              # target long edge of each overview
+  max_read_bytes: 268435456     # 256 MiB cap on any single block read
+  dpi: 110
+  rslc_quicklook: true          # also quicklook the input RSLCs in radar coords
+
+# ---------------------------------------------------------------------
+# Interferogram (stage G3) -- conjugate product, coherence, per-date amplitude
+# ---------------------------------------------------------------------
+# Runs BEFORE watermask: the mask is built on this stage's grid so it is
+# pixel-aligned by construction.
+igram:
+  enabled: true
+
+  # null -> first entry of `frequencies` / `polarizations` above.
+  # THE POLARIZATION IS HH AND THAT IS ALL THERE IS. The granules are DHDH
+  # (HH + HV) and the L2 GSLCs carry HH only -- there is no VV anywhere in this
+  # product. Where a VV amplitude is wanted, HH is the correct co-pol
+  # substitute, and every label downstream says HH rather than VV.
+  freq: null
+  pol: null
+
+  # Block-average factors in ROWS and COLUMNS of the GSLC grid (not radar
+  # range/azimuth). The freq-B posting is 40 x 5 m, so 16 rows x 2 cols gives
+  # square 80 x 80 m output pixels: 59800 x 7575 -> 3737 x 3787.
+  # freq A posting is 5 x 5 m -- essentially SQUARE (native 4.72 rg x 4.46 az),
+  # so equal looks are correct here. 16 x 16 -> 80 x 80 m, matching the freq-B
+  # product's analysis scale so the two bands are directly comparable.
+  # (The asymmetric 16 x 2 above was for freq B's 40 x 5 m posting.)
+  # Sliding-window size for coherence. Used whenever the look box has FEWER
+  # samples than the window would (looks_y*looks_x < coherence_window**2), which
+  # is the case for every small look setting. Phase is unaffected.
+  coherence_window: 5
+  looks_y: 2
+  looks_x: 2
+
+  # Streaming block height in GSLC rows. Multiple of BOTH looks_y (16) and the
+  # 512-row HDF5 chunking, so look boxes never straddle a block boundary and
+  # gzip never re-inflates the same chunk twice. ~350 MB peak.
+  block_rows: 512
+
+  # Each date's own multilooked amplitude, on the same grid. The pair's .amp
+  # band is the GEOMETRIC MEAN of the two dates and cannot show per-date
+  # backscatter, which is what the overlay needs.
+  per_date_amplitude: true
+
+  # Empty -> every consecutive date pair (here: one, 20260613 x 20260625).
+  pairs: []
+
+  pair_dir_template: "pairs/{ref}_{sec}/trackG"
+  prefix_template: "ifg_{freq}_{pol}"
+
+# ---------------------------------------------------------------------
+# Water mask -- substitute for the course's NASADEM bit-15 route, which is
+# broken upstream (SRTMSWBD 404s; sardem substitutes zeros and exits 0).
+#
+# The threshold is applied to ORTHOMETRIC height. Our DEM is WGS84 ellipsoidal
+# and local sea level is about -28 m ellipsoidal here, so the course's `h <= 0`
+# used unchanged would drown 1,591 km2 of real coastal land. See watermask.py.
+# ---------------------------------------------------------------------
+watermask:
+  enabled: true
+  method: dem_orthometric
+  # Built on the interferogram grid, so it is pixel-aligned by construction.
+  # null -> derived from igram.freq / igram.pol and the pair on disk. Setting a
+  # literal here goes stale whenever frequency, polarization or the pair changes.
+  reference_raster: null
+  geoid_crs: EPSG:9518          # WGS84 + EGM2008 height
+  sea_level_margin_m: 1.0       # H <= this is water; flat plateau over 0.25-3 m
+  include_inland: false         # true also catches Lake Valencia (dark + elevated)
+  # A box of open Caribbean, in the grid CRS (EPSG:32619). The stage asserts
+  # this comes out >95% water -- the check the broken NASADEM route would fail.
+  # Keep it well inside the swath: the swath is a rotated parallelogram in a
+  # north-up bounding box, so boxes near the NE corner are mostly nodata.
+  # Verified 100% water against the orthometric DEM for the CURRENT aoi_lonlat.
+  # Must lie inside the grid; the stage now clamps and warns instead of failing.
+  ocean_probe: [580000.0, 1176000.0, 600000.0, 1196000.0]
+  min_water_fraction: 0.01
+  max_water_fraction: 0.95
+
+# ---------------------------------------------------------------------
+# Unwrapping (stage G4) -- a faithful port of the course chain, in its order:
+#   Goldstein filter -> phase-sigma coherence -> water mask -> zero the
+#   interferogram at invalid -> snaphu -> zero unw and conncomp at invalid
+#
+# The correlation fed to SNAPHU is the PHASE-SIGMA coherence computed from the
+# FILTERED interferogram -- NOT the boxcar coherence in ifg_B_HH.coh.tif, which
+# is the display/QA product. Both course drivers pass filt_mli.phsig.coh.tif.
+# ---------------------------------------------------------------------
+unwrap:
+  enabled: true
+
+  # Goldstein. Both are the ISCE2 topsApp defaults and the course never changes
+  # them. alpha is the exponent in H = |S|**alpha; psize is the FFT patch, with
+  # 50% overlap and a triangular taper applied after the inverse FFT.
+  filter_alpha: 0.5
+  filter_psize: 32
+
+  # Phase-sigma window sizes. The course does not even expose these from its
+  # wrapper -- they are always 5 / 5.
+  phsig_win: 5
+  phsig_grad_win: 5
+
+  # Course value is 500. Raising it is a pure speed/memory change with NO
+  # numerical effect: same iteration order, same arithmetic, ~1 MB per batch.
+  phsig_batch: 5000
+
+  # THE ASYMMETRY THAT SILENTLY BREAKS A PORT OF THIS CHAIN.
+  #   phsig  gets the NOMINAL looks           = looks_y * looks_x     = 32
+  #   snaphu gets the EFFECTIVE looks         = 32 / 1.2^2            = 22.22
+  # null derives the nominal count from igram.looks_y * igram.looks_x so the two
+  # cannot drift apart. In the course's 4 x 2 setup these are 8 and 5.56, and
+  # its phsig helper's DEFAULT nlks is also 8 -- so copying its bare call here
+  # would silently pass 8 instead of 32 and badly overestimate coherence.
+  nlooks_nominal: null
+  # 1.2 per dimension (1.44 total) is the ISCE2 convention for nominal -> ENL.
+  # It is not derived for a geocoded GSLC geometry, but it errs conservative and
+  # it agrees with the measured coherence floor: sqrt(pi)/(2*sqrt(22)) = 0.189,
+  # which is where open water sits in this scene.
+  oversample_factor: 1.2
+
+  cost: smooth
+  init: mcf
+
+  # SINGLE TILE, SINGLE PROCESS -- the course's settings. Nothing about tiling
+  # or parallelism is configured anywhere in the course. [4, 4] with nproc 8 is
+  # far faster and lighter on this 14.2 Mpx grid, but per-tile reoptimisation
+  # changes the solution and the connected-component labelling: a scientific
+  # change, not a performance flag. The config layer warns if you change it.
+  # TILED. At 1x1 looks the grid is ~662 Mpx; a single-tile solve needs ~250 GB.
+  # Measured scaling: peak RAM tracks TILE size x nproc, not total grid
+  # (4.94 Mpx needs 1.77 GB untiled but 0.55 GB at [4,4] with nproc 4).
+  # [20,40] -> ~890 x 930 px tiles; +200 px overlap each side -> ~1.7 Mpx
+  # effective, ~0.66 GB per process, ~5.3 GB at nproc 8.
+  #
+  # tile_overlap is a CORRECTNESS parameter, not a speed knob: it is the region
+  # snaphu uses to resolve the integer 2*pi offset between neighbouring tiles.
+  # Too small and adjacent tiles settle on offsets differing by a cycle, giving
+  # a seam that can masquerade as a fault. 200 px = 1 km at 5 m posting.
+  ntiles: [10, 17]
+  tile_overlap: 200
+  nproc: 4
+  # MUST be false whenever ntiles != [1,1] on a memory-bounded box. snaphu-py:
+  # "after unwrapping with multiple tiles, an additional post-processing
+  # unwrapping step is performed to re-optimize the unwrapped phase using a
+  # SINGLE tile" -- i.e. it undoes the entire memory benefit of tiling in the
+  # last step. At 169 Mpx that final pass needs ~65 GB (385 B/px measured).
+  # Cost of false: conncomp labels come from the tiled solution and stitching,
+  # not a global re-solve, so seams matter more. regrow_conncomps then applies.
+  single_tile_reoptimize: false
+  # Also false: snaphu regrows conncomp labels "using a single tile" too, so it
+  # carries the same full-grid memory cost (cheaper -- labelling, not a re-solve
+  # -- but still unbounded by tile size). CAVEAT: with both off, conncomp labels
+  # come from the tiled solution and its stitching, so check seams before
+  # trusting component boundaries near the fault.
+  regrow_conncomps: false
+
+  # Applied by ZEROING the interferogram, not via snaphu's mask= argument --
+  # that is what the course does, and switching changes conncomp labelling.
+  water_mask: true
+  # Refuse to unwrap if the mask covers more than this fraction of the swath.
+  # An all-water mask is the exact signature of the broken NASADEM producer,
+  # which pre-fills its mosaic with WATER and exits 0 when every tile 404s.
+  # Measured here: 47.2% water, so 0.60 leaves real headroom.
+  water_max_fraction: 0.60
+
+  # null -> snaphu's own temp dir. Point at the case scratch/ if /tmp is small.
+  scratchdir: null
+
+# ---------------------------------------------------------------------
+# Overlay (stage G5) -- folium HTML over Google Satellite tiles
+# ---------------------------------------------------------------------
+overlay:
+  enabled: true
+  opacity: 0.85
+
+  # 1 = full resolution, sidecar PNGs (~39 MB total, layers load on demand).
+  # 2 = 160 m pixels, which is what makes `embed: true` reasonable.
+  decimate: 1
+
+  # false -> write PNGs beside the HTML and link them, so only the visible
+  # layer is fetched. true -> a single portable file, ~4/3 the PNG bytes,
+  # parsed on every load regardless of which layers are on.
+  embed: false
+
+  zoom_start: 9
+  basemap_url: "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
+  basemap_attr: "Google Satellite"
+  max_zoom: 20
+
+  # Amplitude is stretched over a scale POOLED across both dates, otherwise the
+  # two are not comparable. Coherence and wrapped phase are never stretched.
+  amplitude_percentiles: [2.0, 98.0]
+  unwrap_percentiles: [2.0, 98.0]
+
+  # Also show the phase-sigma coherence -- the correlation SNAPHU actually saw,
+  # which is not the same raster as the displayed boxcar coherence.
+  include_phsig: true
+
+  html_name: trackG_overlay.html
+
+# ---------------------------------------------------------------------
+# Stage toggles. The CLI's --only / --start-step / --stop-step layer on top.
+# ---------------------------------------------------------------------
+steps:
+  ingest: true
+  dem: true
+  gslc: true
+  gridgate: true
+  qa: true
+  igram: true
+  watermask: true
+  unwrap: true
+  overlay: true
