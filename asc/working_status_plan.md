@@ -263,6 +263,34 @@ optional: KML_FILE, KML_GCS_BLOB, REFERENCE_SLC
 `--monitor` retries SPOT failures on STANDARD VMs; `PROJECT_ID`, `LOCATION` and `IMAGE_URI` are
 **module constants at lines 19-25**, changeable only by editing the file.
 
+### The NISAR image exists
+
+Built from `isce2-docker/Dockerfile.nisar` and pushed 2026-09-03:
+
+```
+asia-south1-docker.pkg.dev/iocl-poc-479616/isce2-trials/isce3:pair_wise
+sha256:9d6802cf92fb68699fdf5285a186a097fc2d19488d2b7795373fbaec112042f9
+```
+
+That is the `IMAGE_URI` a NISAR orchestrator would reference, the counterpart to orch_v3's
+`isce2:multi_resolution_icu_radar_v2`. It clones `s1-nisar-setup`, creates `isce3_env` from
+`asc/env/isce3_env.yml`, applies the upstream patches, and **runs `verify.sh` at build time** so a
+broken environment fails the build rather than the first Batch task. Credentials are not baked in
+— mount `~/.netrc`.
+
+Rebuild after pushing repo changes; `CACHEBUST` sits just above the clone so everything below it
+re-runs and everything above stays cached:
+
+```bash
+cd isce2-docker
+docker build --build-arg CACHEBUST=$(date +%s) -f Dockerfile.nisar -t isce3:pair_wise .
+docker tag  isce3:pair_wise asia-south1-docker.pkg.dev/iocl-poc-479616/isce2-trials/isce3:pair_wise
+docker push asia-south1-docker.pkg.dev/iocl-poc-479616/isce2-trials/isce3:pair_wise
+```
+
+For iterating on the workflow, use a plain conda env on the VM instead — a container adds a
+rebuild between every edit. The image is for Batch.
+
 **Gap worth closing when we build the NISAR equivalent**: `orch_v3.py` has no output-existence
 check, so a re-run reprocesses everything. The mechanism already exists in the repo —
 `orch_unwrap.py:43-67` is a working `--skip_done` probe.
