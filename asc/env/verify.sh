@@ -67,6 +67,12 @@ with tempfile.NamedTemporaryFile(suffix=".h5") as t:
 print("hdf5 round-trip    ok (complex64 + gzip)")
 PY
 
+hr "upstream patches"
+# Pure-Python upstream fixes overlaid onto the conda package. --check only
+# reports; it never modifies the environment from verify.sh.
+conda run --no-capture-output -n isce3_env python \
+  "$(dirname "$0")/../nisar_workflows/tools/apply_patches.py" --check || fail=1
+
 hr "isce3_env CLIs"
 conda run --no-capture-output -n isce3_env bash -lc \
   'for c in s1_cslc.py s1_geocode_stack.py burst2stack eof sardem; do
