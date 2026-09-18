@@ -1,5 +1,16 @@
 # NISAR InSAR production pipeline: design decision (2026-09-15)
 
+> **SUPERSEDED IN PART (2026-09-18).** Revision 2 below specifies dolphin for the time series with MintPy on the GUNW stack
+> as an independent check. **That is not what shipped.** `nisar_timeseries.py` forms its own interferograms from the
+> coregistered stack, unwraps them with snaphu in tiles, applies the GUNW corrections and inverts with MintPy; dolphin has
+> never been run in this project and nothing independently cross-checks the inversion. What the chain does verify is
+> interferogram formation (against ISCE3's own RIFG, on every pair sharing the stack reference) and unwrapping consistency
+> (whole-cycle closure over triplets). The decision was deliberate — a crop-first single-reference stack with GUNW
+> corrections made a plain pair network sufficient and directly verifiable — but it was never written back here.
+> For what actually runs, read [TIMESERIES_MODULE.md](TIMESERIES_MODULE.md). The sections below remain the reference for
+> stage costs and for the evidence behind the crop-first and GUNW-corrections choices.
+
+
 > **Revision 2 (2026-09-15, later the same day) — supersedes the decision below.** Full-tile processing
 > proved too storage- and compute-heavy for routine use: one full-tile pair needs ≈ 333 GiB scratch and ≈ 10 h. The user
 > chose instead:

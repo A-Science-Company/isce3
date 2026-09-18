@@ -7,6 +7,7 @@ Purpose: the evidence base for automating a modular NISAR SLC → interferogram 
 |---|---|
 | [COREG_MODULE.md](COREG_MODULE.md) | **`nisar_coreg.py`**: config-driven coregistration module (RSLC/GSLC, optional crop, reference date), stages, outputs, job semantics |
 | [glof_event report](../../case_studies/nepal_nisar_ascending/report/glof_event/nepal_glof_nisar_event_report.html) | **Event study**: NISAR analysis of the 26 Aug 2026 outburst (pre-event limits, coherence, backscatter change, controls); built by `tools/glof_event_analysis.py` + `tools/build_glof_event_report.py` |
+| [VM_HANDOVER_ANSWERS_2.md](VM_HANDOVER_ANSWERS_2.md) | **Handover Q&A round 2 (2026-09-18)**: the measurements — range misregistration across all seven dates, the crop-buffer shrink, side-band alignment — plus the 84-probe assessment and the GUNW baseline cross-check |
 | [VM_HANDOVER_ANSWERS.md](VM_HANDOVER_ANSWERS.md) | **Handover Q&A (2026-09-18)**: answers from disk to the 60 questions in `vm_handover_questions.md` — AOI geometry, granule dimensions, what shipped vs what was specified, per-key parameter provenance, VM state, orchestrator backlog |
 | [TIMESERIES_MODULE.md](TIMESERIES_MODULE.md) | **`nisar_timeseries.py`**: coregistered stack → pair network → tiled snaphu → GUNW ionosphere/troposphere/tides → MintPy LOS velocity |
 | [PIPELINE_DESIGN.md](PIPELINE_DESIGN.md) | **The decided production pipeline** (full-tile RSLC → wrapped + coherence + ionosphere → export; AOI unwrap), stage budget, export layout, untested levers |

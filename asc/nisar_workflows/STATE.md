@@ -153,6 +153,18 @@ Choice of geometry pending with the user.
 
 ## Withdrawn or refuted claims — do not re-introduce
 
+- **"The crop-first chain's interferograms are correct because the pairs that were checked matched ISCE3"** (2026-09-16):
+  wrong as stated. Only pairs sharing the stack reference had a RIFG to check against. The flattening omitted the constant
+  difference in starting range between each date's crop, which is half a phase cycle for an 8-sample difference at L-band, so
+  two reference pairs came out sign-inverted and every pair without the reference carried an unchecked constant. Fixed by
+  adding (start_sec - start_ref) to the flattening term; all four checkable pairs then agreed with ISCE3 to <= 0.003 rad.
+  The lesson is about coverage, not about the threshold: the gate was right and reached 4 of 9 pairs.
+- **"The glacier zone cannot be measured because its coherence is too low"** (2026-09-18): wrong cause. Coherence is low
+  (0.15-0.19), but what removed the pixels was MintPy's default `maskDataset = connectComponent`: snaphu puts 99 % of the ice
+  in component 0, so only 9 of 670 pixels were inverted at all, and lowering the temporal-coherence threshold from 0.7 to 0.1
+  changed nothing. With the mask off, 405 of 670 invert. The conclusion (no resolvable motion) survives; the stated reason did
+  not.
+
 - "Cropped GSLC −1.227 TECU is within the degeneracy of full −1.428": whole-scene vs AOI medians. Same pixels agree to 0.0002 TECU (v2).
 - "RUNW 1×1 carries an interpolated ionosphere screen": ionosphere was disabled there; the screen is zeros.
 - "R−G phase difference is a planar ramp from reference-phase handling": refuted; it is the azimuth residual × Doppler carrier.
