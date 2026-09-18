@@ -62,3 +62,20 @@ EXPORT OF THIS SOFTWARE IS SUBJECT TO U.S. EXPORT CONTROL LAWS AND REGULATIONS
 AS SPECIFIED BY THE TERMS OF ITS EAR99 NLR CLASSIFICATION.
 
 PLEASE READ THE LICENSE FILE FOUND IN THIS PACKAGE FOR FURTHER DETAILS.
+
+
+
+source /home/sharath/miniforge3/etc/profile.d/conda.sh && conda activate isce3_env
+cd /home/sharath/isce3/asc/nisar_workflows
+python nisar_coreg.py -c coreg_configs/nepal_nisar_ascending_rslc.yaml status
+python nisar_coreg.py -c coreg_configs/nepal_nisar_ascending_rslc.yaml run --detach          # all stages, in tmux
+python nisar_coreg.py -c coreg_configs/nepal_nisar_ascending_rslc.yaml run --stage coreg --dates 20260831   # one unit
+
+
+
+cd /home/sharath/isce3/asc/nisar_workflows
+C=ts_configs/nepal_nisar_ascending_pre_event.yaml
+python nisar_coreg.py -c coreg_configs/nepal_nisar_ascending_rslc.yaml status   # all pairs "done"
+python nisar_timeseries.py -c $C show        # "coreg ready  yes", 9 pairs, GUNW chain connects all dates
+python nisar_timeseries.py -c $C run --detach
+python nisar_timeseries.py -c $C status      # while it runs
