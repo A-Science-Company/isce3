@@ -1,0 +1,12 @@
+# Nepal GLOF, ascending T98/F16: pre-event LOS time series and velocity. Parameters: ts_configs/defaults.yaml.
+coreg_config: coreg_configs/nepal_nisar_ascending_rslc.yaml    # the coregistered stack (must be finished for these dates)
+name: pre_event
+aoi_kml: /home/sharath/nisar_downloader/glof_bigger_aoi.kml     # unwrap + time-series area
+start_date: 20260620
+end_date: 20260819                                              # the event was 2026-08-26
+reference_lalo: [28.32822, 85.37753]                                            # [lat, lon] of a stable point; null = automatic
+
+# Relaxed inversion for the glacier zone (2026-09-16): snaphu puts 99 % of the ice pixels in component 0, so the default
+# connectComponent mask removed them from every interferogram and only 9 of 670 were inverted at all. With the mask off,
+# every pixel is inverted and temporal coherence does the filtering instead.
+mintpy: {mask_dataset: "no", min_temporal_coherence: 0.3}

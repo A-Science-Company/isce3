@@ -58,6 +58,66 @@ PATCHES = [
             "    disk. Matters directly for Track R."
         ),
     },
+    {
+        "name": "generate_insar_mask vectorised",
+        "upstream": "none -- ours; report upstream",
+        "src": PATCH_DIR / "insar_utils.py",
+        "target": "nisar/products/insar/utils.py",
+        "requires": [
+            ("nisar.products.insar.utils", "_compute_subswath_mask_id"),
+        ],
+        "why": (
+            "generate_insar_mask built the mask with a pure-Python double loop\n"
+            "    appending one int per output pixel to a list. It is called on the\n"
+            "    INTERFEROGRAM grid (InSAR_L1_writer.py:752), whose size is set by\n"
+            "    crossmul looks: 40 Mpx at freq B 9x1, but 2886 Mpx at freq A 1x1.\n"
+            "    There it is 2.886e9 iterations and ~58 GB of transient Python list +\n"
+            "    int64 array -- hours of runtime and an OOM on a 31 GB box.\n"
+            "    The replacement preallocates uint32 and vectorises the range loop.\n"
+            "    Verified BIT-IDENTICAL on real freq B data by\n"
+            "    tools/test_insar_mask_patch.py (2.71 Mpx, 13x faster).\n"
+            "    Falls back to the stock code when num_sub_swaths != 1."
+        ),
+    },
+    {
+        "name": "h5_prep RUNW_STANDALONE / GUNW_STANDALONE product_dict entries",
+        "upstream": "none -- ours; report upstream",
+        "src": PATCH_DIR / "h5_prep.py",
+        "target": "nisar/workflows/h5_prep.py",
+        "requires": [
+            ("nisar.workflows.h5_prep", "get_products_and_paths"),
+        ],
+        "why": (
+            "get_products_and_paths() has RUNW_STANDALONE and GUNW_STANDALONE in\n"
+            "    its h5_paths dict but NOT in product_dict, while unwrap.py and\n"
+            "    geocode_insar.py both set product_type to exactly those strings\n"
+            "    when invoked standalone. Result: KeyError: 'RUNW_STANDALONE',\n"
+            "    so `python -m nisar.workflows.unwrap <cfg>` cannot run at all.\n"
+            "    That entry point is how you resume an unwrap against an existing\n"
+            "    RIFG instead of repeating the whole coregistration."
+        ),
+    },
+    {
+        "name": "unwrap streams snaphu inputs from disk",
+        "upstream": "none -- ours; report upstream",
+        "src": PATCH_DIR / "unwrap.py",
+        "target": "nisar/workflows/unwrap.py",
+        "requires": [
+            ("snaphu.io", "Raster"),
+        ],
+        "why": (
+            "unwrap.py called open_raster() on the interferogram AND coherence,\n"
+            "    materialising both as numpy arrays before snaphu ran. At full\n"
+            "    resolution on frequency A (53200 x 54244) that is 23.1 + 11.5 =\n"
+            "    34.6 GB, so a 1x1 unwrap was impossible on a 31 GB box -- for\n"
+            "    reasons unrelated to snaphu, which tiles happily at any size.\n"
+            "    snaphu.unwrap() accepts an InputDataset Protocol and\n"
+            "    snaphu.io.Raster implements it file-backed; measured peak RSS\n"
+            "    for opening both 1x1 rasters is 0.10 GB. Also normalises the\n"
+            "    HDF5 subdataset path from ISCE3's 'HDF5:f:/grp' to rasterio's\n"
+            "    required 'HDF5:f://grp'."
+        ),
+    },
 ]
 
 

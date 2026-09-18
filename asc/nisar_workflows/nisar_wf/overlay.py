@@ -332,7 +332,7 @@ def wavelength_m(cfg: Config, stack: dict, freq: str) -> float:
     import h5py
 
     for d in stack["dates"]:
-        p = cfg.gslc_output(d, cfg.freq_tag)
+        p = cfg.resolve_gslc(d, cfg.igram_freq)
         if not p.exists():
             continue
         try:

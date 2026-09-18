@@ -1,84 +1,80 @@
+# ---------------------------------------------------------------------
+# nepal_glof_aoi_v2 -- the CROPPED-FIRST legs (RSLC R_crop and GSLC G_crop) of
+# the four-way comparison, built from subset granules made by the CORRECTED
+# tools/rslc_subset.py.
+#
+# Why v2 exists. The v1 subset granules (L1_RSLC_AOI/, configs/nepal_glof_aoi.yaml,
+# out_root <case>/aoi) had two bugs, both found by adversarial verification:
+#   1. NATIVE Doppler (~957-983 Hz) was used to place the crop window on a
+#      zero-Doppler product, sliding it ~3300 lines (~15 km) along track: the
+#      north of the AOI was missed (its NW third only 7.5% covered).
+#   2. Freq-B range was buffered independently of freq A, so the two dates had
+#      different A-to-B range origins (482.125 vs 481.500 B px). ISCE3's
+#      main_side_band ionosphere assumes they are equal
+#      (nisar/workflows/ionosphere.py:122-237) and mis-registered freq B by
+#      0.625 px: B coherence 0.573 -> 0.428 and ~-1.49 TECU of false ionosphere.
+# v1 is kept intact as evidence; nothing here writes into it.
+#
+# What differs from configs/nepal_glof.yaml (the full-tile benchmark config):
+#   granules      L1_RSLC_AOI_v2/{date}_aoi.h5, listed explicitly
+#   out_root      <case>/aoi_v2   (separate tree; distinct case_name)
+#   frequencies   [A, B]          (B is needed by the ionosphere legs)
+#   track_r.frequency A, looks A 1x1 -- the benchmark's settings, in the config
+#                 rather than only in CLI flags
+# Everything that shapes the science (dense offsets, crossmul 1x1, unwrap 9x8
+# with nlooks 44.57, snaphu [4,4]/nproc 8/overlap 256, ionosphere settings,
+# igram 1x1 with a 3x3 coherence window) matches the benchmark.
+#
+# Crop geometry (from the subset log): zero-Doppler window, azimuth origin a
+# multiple of 9 and range origin a multiple of 8 (the 9x8 unwrap/ionosphere
+# looks), freq-B origin = freq-A origin / 8 on every date; buffers 1000 lines and
+# 12.5 km slant range (set by ISCE3's ionosphere Gaussian, not coregistration).
+# About 276 Mpx of freq A = 9.6% of the full radar grid.
+# ---------------------------------------------------------------------
 # =====================================================================
-# Track G (GSLC) run configuration -- TEMPLATE
+# Track G (GSLC) run configuration -- NEPAL GLOF
 # =====================================================================
-# Copy this file, rename it for the site, and change ONLY the fields marked
-# "CHANGE ME". Everything else was chosen and justified on a real pair and is
-# a sensible default anywhere.
+# TEMPLATE. Copy of the Venezuela config with the site-specific fields blanked.
+# Every tunable below was chosen and justified on the Venezuela pair; only the
+# marked fields need changing for Nepal.
 #
-#     cp configs/_template.yaml configs/<site>.yaml
-#     $EDITOR configs/<site>.yaml            # case_name, case_dir
-#     mkdir -p <case_dir>/L1_RSLC && <copy the granules there>
-#     python run_track_g.py --config configs/<site>.yaml --only ingest
+#   python run_track_g.py --config configs/nepal_glof.yaml --only ingest
 #
-# NOTHING ABOUT A SITE IS HARDCODED IN THE CODE. Stage A (ingest) reads the
-# granules and derives track, frame, orbit direction, look side, acquisition
-# dates, the UTM zone (EPSG) and the pinned output geogrid from the products
-# themselves. Switching site is a config change, never a code change.
+# BEFORE THE FIRST RUN, set:
+#   1. case_dir            -- where the granules live on THIS machine
+#   2. geogrid.aoi_lonlat  -- null = full frame; see the note there
+#   3. frequencies/looks   -- see "sizing" below
 #
-# ---------------------------------------------------------------------
-# THE ORDER TO WORK IN
-# ---------------------------------------------------------------------
-# 1. ingest             instant, metadata only. Reports what the pair IS:
-#                       track/frame, ascending or descending, look side,
-#                       temporal baseline, which frequencies and pols exist,
-#                       grid dimensions. Run this FIRST, always -- it costs
-#                       nothing and tells you whether the rest is worth doing.
-# 2. dem                a few minutes
-# 3. gslc               the long one. Sized by aoi x posting, NOT by granule
-#                       size -- see "sizing" below.
-# 4. gridgate           instant. MUST print ALIGNED; it is the proof that the
-#                       two dates share a grid, which is what makes them
-#                       coregistered.
-# 5-7. qa, igram, watermask
-# 8-9. unwrap, overlay
+# Ingest AUTO-DISCOVERS the granules from <case_dir>/L1_RSLC/ and derives
+# track, frame, orbit direction, look side, dates, EPSG and the pinned geogrid
+# from the products themselves. Nothing about the site is hardcoded.
 #
-# Run frequency B before committing to frequency A. Freq B is the same swath
-# and the same azimuth sampling with ~8x fewer range samples, so it exercises
-# the whole pipeline at roughly 1/8 the cost.
+# Data: gs://s1-slc/nepal/nisar/ascending/tile_1/
+#   gsutil -m cp 'gs://s1-slc/nepal/nisar/ascending/tile_1/**/*RSLC*.h5' \
+#       <case_dir>/L1_RSLC/
 #
-# ---------------------------------------------------------------------
-# SIZING -- read before setting posting, looks or aoi
-# ---------------------------------------------------------------------
-# Measured, not estimated:
-#
-#   snaphu memory        385 bytes/pixel, linear. With tiling, peak tracks
-#                        TILE SIZE x nproc, not the total grid.
-#   downstream products  ~46 bytes/pixel across the nine rasters a pair
-#                        produces. At 1x1 looks over a 186 x 89 km AOI that
-#                        is 72 GiB; at 2x2 it is 18 GiB.
-#   GSLC output          (w x h) x 9 bytes per date per pol, uncompressed;
-#                        compresses ~2x in practice.
-#
-# So: aoi_area / posting^2 sets everything downstream. Decide posting and AOI
-# together, against the disk you actually have.
-#
-# ---------------------------------------------------------------------
-# THREE MISTAKES ALREADY MADE -- do not repeat them
-# ---------------------------------------------------------------------
-# * DO NOT set looks to reduce coregistration cost. Looks are consumed at
-#   crossmul, which runs AFTER every coregistration stage. They change the
-#   interferogram, never the geocoding or resampling cost.
-# * DO NOT enable single_tile_reoptimize or regrow_conncomps alongside
-#   tiling. Both run a full-grid single-tile pass that undoes the entire
-#   memory benefit of tiling. See the unwrap section.
-# * DO NOT pick an AOI from a summary statistic. On the first case study the
-#   AOI was chosen by maximising coherence and landed 100 km from the signal.
-#   Start with null (full frame), then choose from what the imagery shows.
+# A NOTE ON THE SCIENCE. Venezuela was a coseismic pair: the signal was
+# DEFORMATION, read from unwrapped phase. A GLOF flash flood is different --
+# the strongest signals are AMPLITUDE CHANGE (channel scour, new deposits,
+# inundation) and COHERENCE LOSS (surface disturbance between passes). Those
+# come out of stages 6-7 and need no unwrapping at all, so the open Track G
+# unwrap problem is NOT blocking for a first look here. Unwrapped phase still
+# matters for any co-event slope movement.
 # ---------------------------------------------------------------------
 
-# CHANGE ME -- short slug; names the run in logs and provenance
-case_name: CHANGE_ME
-# CHANGE ME -- absolute path. Granules go in <case_dir>/L1_RSLC/ ;
-# products are written alongside them.
-case_dir: /CHANGE/ME/case_studies/CHANGE_ME
+case_name: nepal_glof_aoi_v2
+# CHANGE ME -- absolute path; granules go in <case_dir>/L1_RSLC/
+case_dir: /home/sharath/isce3/case_studies/nepal_glof
 
 # out_root: null  ->  write products alongside the granules, in case_dir:
 #   stack.json  cfg/  L2_GSLC/  aux/dem/  qa/  logs/  provenance/  scratch/
-out_root: null
+out_root: /home/sharath/isce3/case_studies/nepal_glof/aoi_v2
 
 # Empty -> auto-discover NISAR_L1_*RSLC*.h5 in case_dir and sort by acquisition
 # date (earliest becomes the reference). List paths explicitly to pin the stack.
-granules: []
+granules:
+  - /home/sharath/isce3/case_studies/nepal_glof/L1_RSLC_AOI_v2/20260714_aoi.h5
+  - /home/sharath/isce3/case_studies/nepal_glof/L1_RSLC_AOI_v2/20260726_aoi.h5
 
 # ---------------------------------------------------------------------
 # What to process
@@ -87,7 +83,8 @@ granules: []
 # freq A but 8x fewer range samples (6582 vs 52649), so it exercises the entire
 # pipeline end to end at roughly 1/8 the cost. Switch to [A] -- or [A, B] -- once
 # the workflow is trusted. Note freq A at 5 m posting is a ~29 GB/pol output.
-frequencies: [A]
+# v2: both bands -- B feeds the split-spectrum ionosphere on both tracks.
+frequencies: [A, B]
 
 # HH only to start. HV is present in both granules and both frequencies; adding
 # it here doubles output size and geocoding time.
@@ -126,13 +123,21 @@ geogrid:
   # >=85% land, this one had the best coherence -- median 0.632 (scene-wide is
   # 0.432), 78.6% above 0.5, 92.9% land. Western massif, inland of the coast.
   # At 5 m: 12000 x 12000 px, 2.41 GiB for the pair (HH only, uncompressed).
-  # OPTIONAL -- [west, south, east, north] in degrees, INTERSECTED with the
-  # granule footprint. null = the full frame.
+  # AOI as [west, south, east, north] in degrees, INTERSECTED with the granule
+  # footprint. null = the full frame.
   #
-  # LEAVE null FOR THE FIRST RUN. Process the full frame at frequency B, look
-  # at the result, and only then narrow. This is NOT a crop of the RSLC and
-  # never needs to be: gslc.py reads only the radar slice feeding each output
-  # block, so a smaller output grid reads less of the granule automatically.
+  # START WITH null. Run steps 1-7 (through watermask) on frequency B, look at
+  # the coherence and amplitude, and pick the AOI from what you SEE -- that is
+  # how the Venezuela AOI was chosen, and the first attempt there was wrong
+  # because it optimised for coherence rather than for signal.
+  #
+  # For a GLOF, the AOI should cover the source lake, the flood path down-valley
+  # and the depositional reach. Coherence will be LOW along the flood path --
+  # that is the signal, not a problem to avoid.
+  #
+  # This is NOT a crop of the RSLC and never needs to be: gslc.py reads only
+  # the radar slice feeding each output block, so a smaller grid reads less of
+  # the granule automatically.
   aoi_lonlat: null
 
   # Output pixel spacing in metres, per frequency. Positive; ISCE3 applies the
@@ -150,7 +155,15 @@ geogrid:
     # signal without aliasing it. Going to y: 10.0 halves the output (1.8 GB
     # instead of 3.3 GB per pol) and still clears Nyquist, but with far less
     # headroom -- change it only deliberately.
-    B: {x: 40.0, y: 5.0}
+    # 5 x 5 -- IDENTICAL to A, deliberately, not freq B's native anisotropic
+    # sampling. The split-spectrum ionosphere port needs both frequencies on the
+    # SAME map lattice so the per-pixel dispersive solve needs no inter-band
+    # resampling. Geocoding gives that for free; Track R could not, because the
+    # 8:1 range ratio forced ISCE3 to solve on freq B's coarse grid and
+    # interpolate back (ionosphere.py:226 decimate / :356 interpolate).
+    # Oversampling freq B's 45.6 m range resolution onto a 5 m grid is
+    # redundant, not wrong -- and the pair then multilooks 8x8 to 40 m together.
+    B: {x: 5.0, y: 5.0}
 
   # Geometry cubes (incidence, LOS, ...) written into the product metadata.
   # Coarse on purpose: these are smooth fields, unrelated to image posting.
@@ -177,13 +190,31 @@ dem:
   path: null
 
   # Degrees of padding around the AOI (which already includes the snapped UTM
-  # box, not just the footprint). Size it from RELIEF, not from the snap:
-  # terrain shifts a pixel's ground position by height / tan(incidence), so
-  # compute max_elevation / tan(inc) and convert to degrees at the scene
-  # latitude, then add margin. 0.1 deg suits ~2 km of relief; 8 km of Himalayan
-  # relief at 41 deg needs 0.15+. rdr2geo warns "limit may be insufficient for
-  # global height range" when this is too small.
-  buffer_deg: 0.1
+  # box, not just the footprint). The binding constraint is NOT the 1 km snap --
+  # it is terrain-induced geolocation shift, which scales with RELIEF:
+  #
+  #     shift = height / tan(incidence)
+  #
+  # This frame reaches 8084 m at 41.1 deg incidence -> 9266 m -> 0.095 deg of
+  # longitude at 28.7 N. 0.1 deg left only 5% margin; 0.15 deg gives 58%.
+  #
+  # 0.1 deg was inherited from the Venezuela case, whose relief is ~2 km. Do not
+  # copy this number between sites without redoing the arithmetic above.
+  #
+  # DO NOT chase this warning, which fires on EVERY block regardless:
+  #     "East/South limit may be insufficient for global height range"
+  # Topo::computeDEMBounds (cxx/isce3/geometry/Topo.cpp:311) sizes the DEM
+  # window it requests by running topo at _minH and _maxH, which
+  # nisar.workflows.rdr2geo never sets -- so they keep the HARDCODED planetary
+  # defaults GLOBAL_MIN_HEIGHT = -500 m and GLOBAL_MAX_HEIGHT = +9000 m
+  # (cxx/isce3/core/Constants.h:53-56). That 9500 m span asks for 10.9 km of
+  # ground spread = 0.112 deg here, and DEMInterpolator.cpp:267-285 then CLAMPS
+  # to the file edge and warns. Any windowed DEM triggers it near its boundary.
+  # It is harmless as long as the buffer covers the ACTUAL relief shift, which
+  # is what the arithmetic above sizes. Silencing it entirely would need
+  # buffer_deg >= 0.112 measured from the radar block perimeter, not the
+  # footprint -- more DEM for no accuracy gain.
+  buffer_deg: 0.15
 
   # null -> sardem's own cache location
   cache_dir: null
@@ -266,9 +297,21 @@ igram:
   # Sliding-window size for coherence. Used whenever the look box has FEWER
   # samples than the window would (looks_y*looks_x < coherence_window**2), which
   # is the case for every small look setting. Phase is unaffected.
-  coherence_window: 5
-  looks_y: 2
-  looks_x: 2
+  # 1 x 1 -- FULL 5 m resolution, matching Track R's 1x1 product. The point of
+  # running Track G is to compare it against Track R at ~5 m, so multilooking
+  # here would throw away exactly the resolution under test.
+  #
+  # This works ONLY because igram.py:214 falls back to a SLIDING window when
+  # looks_y*looks_x < coherence_window**2: at 1x1 (1 < 9) coherence comes from
+  # a 3 x 3 moving window, grid unchanged, phase per-pixel. That is the same
+  # estimator tools/slc_coherence.py applies on the Track R side, so both
+  # tracks' coherence is computed identically (bias floor 0.295 on both).
+  #
+  # Contrast ISCE3's crossmul, which has NO sliding window and hardcodes
+  # coherence = 1.0 at 1x1 (cxx/isce3/signal/Crossmul.cpp:378-388).
+  coherence_window: 3
+  looks_y: 1
+  looks_x: 1
 
   # Streaming block height in GSLC rows. Multiple of BOTH looks_y (16) and the
   # 512-row HDF5 chunking, so look boxes never straddle a block boundary and
@@ -468,16 +511,17 @@ track_r:
   # Frequency to coregister -- ONE only; the chain is per-frequency and the
   # scratch cost of the other band is not shared. B is the tractable choice on
   # this box: same swath and azimuth sampling as A, 8x fewer range samples.
-  frequency: B
+  # v2: A, the benchmark band (was B, with A supplied only on the command line).
+  frequency: A
 
   # HH is the only co-pol in these DHDH (HH + HV) granules. There is no VV.
   polarization: HH
 
-  # RIFG runs D1-D8 + D14 -- the entire coregistration chain plus crossmul --
-  # and STOPS BEFORE phase unwrapping. That is what makes it the right target
-  # here: snaphu measures 385 bytes/pixel, which this 3 GB box cannot pay.
-  # RUNW / GUNW add unwrap and geocode; the config layer warns if you pick them.
-  product_type: RIFG
+  # RUNW, not RIFG. The ionosphere stage is gated on 'RUNW' in out_paths
+  # (insar.py:120-124), so under RIFG it is skipped SILENTLY -- no error, no
+  # output. Reaching split-spectrum therefore REQUIRES unwrapping.
+  # GUNW would add geocoding (and is what a troposphere run needs later).
+  product_type: RUNW
 
   # Multilook applied at crossmul, keyed by frequency. Keyed rather than shared
   # because the two bands have the SAME azimuth spacing (4.454 m) but an 8x
@@ -485,19 +529,24 @@ track_r:
   # both. `range` multiplies the SLANT range spacing; the ground cell is
   # `range * sceneCenterGroundRangeSpacing`, which already carries 1/sin(inc).
   #
-  # Read the native spacings out of stack.json after ingest:
-  #   sceneCenterAlongTrackSpacing  and  sceneCenterGroundRangeSpacing
-  # then pick looks so the product is near-square. For a typical NISAR
-  # frame (4.45 m azimuth; 4.75 m ground range on A, 38 m on B) a ~40 m
-  # cell is 9 x 8 on frequency A and 9 x 1 on frequency B. NOTE that the
-  # SAME looks cannot be right for both bands: azimuth spacing is shared
-  # but range spacing differs by ~8x.
+  #   freq A native: 4.454 m az x  4.750 m ground range
+  #     5 x 5  ->  22.3 x  23.7 m   <- configured
+  #     9 x 8  ->  40.1 x  38.0 m
+  #   freq B native: 4.454 m az x 37.998 m ground range
+  #     9 x 1  ->  40.1 x  38.0 m   <- configured, ~40 m and near-square
+  #     5 x 5  ->  22.3 x 190.0 m   (8.5:1 -- freq B range is ALREADY 38 m)
   looks:
-    A: {azimuth: 5, range: 5}
+    # A at 1x1: the coregistration is native-resolution either way -- looks only
+    # size the RIFG -- so this is a deliberate choice to keep the interferogram
+    # at full resolution too. It costs 34.6 GB of RIFG instead of 2.2 GB at 4x4,
+    # and its coherence band will be identically 1.0 (single-sample estimator).
+    # Fine when the coregistered SLC pair is the deliverable, which it is here.
+    A: {azimuth: 1, range: 1}
     B: {azimuth: 9, range: 1}
 
   # Empty -> every consecutive date pair, matching igram.pairs semantics.
-  # N dates give N-1 pairs, and each re-runs rdr2geo: the reference changes.
+  # Three dates here give two pairs: 20260714x20260726 and 20260726x20260819.
+  # Each pair re-runs rdr2geo, because the reference changes.
   pairs: []
 
   # Refuse to start unless this much would remain free afterwards.
@@ -506,6 +555,14 @@ track_r:
   enforce_disk_gate: true
 
   # -- stage knobs, mapped 1:1 onto the installed insar schema -------------
+  # Memory budget per streaming block, MB. The lines_per_block values below are
+  # CAPS, not literals: the effective height is derived from this budget and the
+  # frequency's range width, so one config is right for both bands.
+  #   freq B (6781 rg): 1000 lines of rdr2geo =  163 MB -> cap applies
+  #   freq A (54244 rg): 1000 lines           = 1302 MB -> derived down to ~196
+  # A fixed value tuned on freq B is an OOM kill hours into a freq A run.
+  block_budget_mb: 256.0
+
   rdr2geo_threshold: 1.0e-7
   rdr2geo_numiter: 25
   rdr2geo_extraiter: 10
@@ -543,6 +600,135 @@ track_r:
   common_band_azimuth_filter: false
 
   gpu_enabled: false
+
+  # ---------------------------------------------------------------------
+  # Phase unwrapping -- required to reach ionosphere, NOT wanted for its own
+  # sake. These looks are INDEPENDENT of `looks` above.
+  #
+  # unwrap.py:122-135 re-runs crossmul from the coregistered SLCs at these
+  # factors, so the RUNW grid gets a freshly computed coherence. That is the
+  # whole reason the RIFG can stay at 1x1 (where the single-sample coherence
+  # estimator is degenerately 1.0) and still be unwrappable.
+  #
+  # 4x4 is a MEMORY constraint, not taste: unwrap.py:278-279 reads the whole
+  # interferogram and coherence into RAM.
+  #   freq A 1x1: 23.1 GB + 11.5 GB = 34.6 GB  -> over this box's 31 GB
+  #   freq A 4x4:  1.4 GB +  0.7 GB =  2.2 GB  -> comfortable
+  # RUNW grid becomes 13300 x 13561 = 180 Mpx, ground cell ~17.8 x 19.0 m.
+  # 1x1 -- full resolution, matching crossmul. Possible only because
+  # tools/patches/unwrap.py streams the inputs via snaphu.io.Raster instead of
+  # loading them: stock open_raster() would need 23.1 + 11.5 = 34.6 GB here.
+  # 9 az x 8 rg -> 40.1 x 38.0 m, grid 5911 x 6780.
+  # THIS KEY ALSO SETS THE FREQUENCY B LOOKS. ionosphere.py:668-681 copies
+  # phase_unwrap looks into crossmul for the freq B pair it builds, so the two
+  # bands land on the SAME grid -- freq A 9x8 (54244/8) and freq B 9x1 (6781/1)
+  # both give 6780/6781 range samples, because the 8:1 range-spacing ratio
+  # exactly cancels. That is what main_side_band's per-pixel 2x2 solve needs.
+  phase_unwrap_range_looks: 8
+  phase_unwrap_azimuth_looks: 9
+  unwrap_algorithm: snaphu
+  # Tiled: the stock default is [1,1] / nproc 1, which would solve 180 Mpx
+  # single-tile on one core. 8 cores are available now.
+  # snaphu peak RAM is per-TILE x nproc, at a measured 385 bytes/pixel.
+  # On the 13300 x 13561 RUNW grid:
+  #   [4,4]   13.06 Mpx tiles -> 5.03 GB/proc -> 40.2 GB across 8   OOM
+  #   [8,8]    3.74 Mpx tiles -> 1.44 GB/proc -> 11.5 GB            OK
+  #   [12,12]  1.89 Mpx tiles -> 0.73 GB/proc ->  5.8 GB            safest
+  # At 1x1 the grid is 53200 x 54244, so tiles must be small enough that
+  # per-tile RAM x nproc fits. At 385 bytes/pixel:
+  #   [16,16] ovl 256 -> 5.03 GB/proc x8 = 40.2 GB   too big
+  #   [32,32] ovl 256 -> 1.85 GB/proc x8 = 14.8 GB   OK
+  #   [48,48] ovl 256 -> 1.02 GB/proc x8 =  8.2 GB
+  # OFF for the 1x1 pass. unwrap.py:356 reads the whole unwrapped phase with
+  # dst_h5[unw_path][()] and bridge_unwrapped_phase then adds a bool mask and an
+  # int32 label array: 11.5 + 2.9 + 11.5 = ~26 GB on the 2886 Mpx grid, AFTER
+  # snaphu has already run for hours. Re-enable for the multilooked pass, where
+  # the same arrays are 1/72 the size.
+  # Resume a standalone unwrap against a finished RIFG instead of repeating the
+  # 8.5 h coregistration. Emitted as phase_unwrap.crossmul_path.
+  # null here. Only the STANDALONE nisar.workflows.unwrap entry point reads
+  # phase_unwrap.crossmul_path; the integrated insar run passes its own
+  # out_paths['RIFG'] (insar.py:109-110) and ignores it. It is still nulled so a
+  # standalone resume can never pick up the full-tile RIFG by accident.
+  unwrap_crossmul_path: null
+
+  # Back ON: the whole-array read at unwrap.py:356 is 40 Mpx here, not 2886 --
+  # 0.16 GB instead of the ~26 GB that forced it off for the 1x1 pass.
+  unwrap_bridge_enabled: true
+
+  # 40 Mpx grid: [4,4] tiles are 1734 x 1951 = 3.4 Mpx -> 1.30 GB/proc.
+  # v2: [4,4] with nproc 8, IDENTICAL to the benchmark's 9x8 unwrap. v1 used
+  # [2,2]/nproc 4 without an observed failure, which added a tiling confound to
+  # the crop-vs-full ionosphere comparison. The v2 grid (1367 x 2805 at 9x8) is
+  # tiny, so memory is no reason to differ.
+  unwrap_ntiles: [4, 4]
+  # OVERLAP IS A CORRECTNESS PARAMETER, not a speed knob: it is the region
+  # snaphu uses to resolve the integer 2*pi offset between neighbouring tiles.
+  # Too small and adjacent tiles settle on offsets differing by a cycle, leaving
+  # a seam that can masquerade as signal. It matters MORE here because
+  # single_tile_reoptimize is false, so the tiled solve plus its stitching IS
+  # the final answer -- there is no global pass to clean up cycle mismatches.
+  # At 1x1 (4.454 m az, 4.750 m rg) against ~1662 x 1695 px tiles:
+  #   128 px ->  570 m az /  608 m rg   ~7.7% of tile   thin
+  #   256 px -> 1140 m az / 1216 m rg   ~15% of tile    used
+  unwrap_tile_overlap: [256, 256]
+  unwrap_nproc: 8
+  # Effective looks for snaphu. MUST be set explicitly whenever crossmul looks
+  # and phase_unwrap looks differ. Left null, unwrap.py:563 derives it as
+  #     rg_spac * az_spac / (rg_res * az_res)
+  # reading the spacings from the RIFG's own interferogram group -- i.e. the
+  # CROSSMUL grid, not the grid it is actually unwrapping. At crossmul 1x1 the
+  # SLC is oversampled relative to its resolution cell, so that ratio is < 1
+  # and snaphu refuses:
+  #     ValueError: nlooks must be >= 1, instead got 0.6189996726516942
+  # The array being unwrapped is the 4x4 re-multilook, whose spacings are 4x in
+  # each dimension, so its effective looks is 16 x 0.6190 = 9.904.
+  # At phase_unwrap 1x1 the unwrap grid IS the crossmul grid, so unwrap.py:563
+  # would at least be self-consistent -- but it still yields 0.6190 (< 1, which
+  # snaphu rejects) because a 1x1 SLC is OVERSAMPLED relative to its own
+  # resolution cell. 1.0 is the honest floor: one independent look per sample.
+  # ISCE3 derives 0.6190 at 1x1 (unwrap.py:563, oversampled SLC). The unwrap
+  # grid here is 9x8, so its effective looks is 72 x 0.6190 = 44.57.
+  unwrap_nlooks: 44.57
+
+  # Both MUST be false while tiled. Each re-solves or relabels over the whole
+  # grid -- 180.4 Mpx x 385 B = 69 GB -- undoing the entire point of tiling.
+  # The price is that connected components come from the tiled solve and its
+  # stitching, so check seams before trusting component boundaries.
+  unwrap_single_tile_reoptimize: false
+  unwrap_regrow_conncomps: false
+
+  # ---------------------------------------------------------------------
+  # Ionosphere -- split spectrum across frequencies A and B
+  # ---------------------------------------------------------------------
+  # main_side_band is the right method for NISAR DHDH data. A and B share a
+  # starting range (878242.006 m) and their range spacings are in an EXACT 8:1
+  # ratio (24.9827 / 3.1228), so decimating A onto B is exact at any look
+  # factor. split_main_band instead splits A's own 40 MHz into sub-bands,
+  # costing two extra full-resolution unwraps and ~92 GB of sub-band SLCs,
+  # and is measurably noisier for this geometry.
+  #
+  # Only frequency A is listed. ionosphere.py builds the frequency B pair
+  # itself by decimating frequency A's geo2rdr/rubbersheet offsets -- a second
+  # Track R run on frequency B is NOT required.
+  #
+  # CAVEAT worth knowing before trusting the output: A is 40 MHz and B is
+  # 5 MHz, and their centres are only 54.5 MHz apart (1.239 vs 1.2935 GHz).
+  # The dispersive/non-dispersive inversion amplifies unwrapped-phase noise by
+  # roughly 17x. The dispersive filter below is not optional -- unfiltered,
+  # the correction is worse than no correction.
+  # OFF for the 1x1 pass, ON for the 40 m pass. This is NOT optional bookkeeping:
+  # ionosphere.py:668-681 derives the frequency B looks from the SAME
+  # phase_unwrap key that sets frequency A, so at phase_unwrap 1x1 the whole
+  # split-spectrum solve would run at 1x1 -- where coherence is identically 1.0,
+  # the filter_mask_type ['coherence'] gate therefore passes every pixel, and
+  # raw single-look speckle feeds a 16.8x-amplifying dispersive inversion.
+  ionosphere_enabled: true
+  ionosphere_spectral_diversity: main_side_band
+  ionosphere_lines_per_block: 1000
+  ionosphere_filter_enabled: true
+  ionosphere_filter_coherence_threshold: 0.5
+  ionosphere_median_filter_size: 15
 
   pair_dir_template: "pairs/{ref}_{sec}/trackR"
 

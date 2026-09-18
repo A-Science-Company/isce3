@@ -257,6 +257,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="override config `polarizations` (e.g. --polarizations HH HV)",
     )
     p.add_argument(
+        "--dates", nargs="+", metavar="YYYYMMDD", default=None,
+        help="geocode only these dates (e.g. --dates 20260714 20260726). "
+             "Per-date and independent, so more can be added later without "
+             "redoing these; the pinned geogrid is unaffected.",
+    )
+    p.add_argument(
+        "--igram-freq", metavar="F", default=None,
+        help="override config `igram.freq` (A | B). Default is frequencies[0]. "
+             "Needed to form the two bands separately for the ionosphere solve.",
+    )
+    p.add_argument(
+        "--looks", nargs=2, type=int, metavar=("LY", "LX"), default=None,
+        help="override config `igram.looks_y`/`looks_x` (e.g. --looks 8 8 for "
+             "40 m from the 5 m grid). The looks are part of the output "
+             "filename, so a different setting never overwrites an existing "
+             "product.",
+    )
+    p.add_argument(
         "--dem-source", metavar="SRC", default=None,
         help="override config `dem.source` (NISAR | COP | NASA | 3DEP)",
     )
@@ -272,6 +290,15 @@ def overrides_from_args(args) -> dict:
         ov["polarizations"] = [p.upper() for p in args.polarizations]
     if args.dem_source:
         ov["dem"] = {"source": args.dem_source.upper()}
+    if args.dates:
+        ov["gslc"] = {"dates": [str(d) for d in args.dates]}
+    ig: dict = {}
+    if args.igram_freq:
+        ig["freq"] = args.igram_freq.upper()
+    if args.looks:
+        ig["looks_y"], ig["looks_x"] = int(args.looks[0]), int(args.looks[1])
+    if ig:
+        ov["igram"] = ig
     return ov
 
 

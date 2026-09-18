@@ -378,7 +378,11 @@ def run(cfg: Config, log: Logger, force: bool = False, dry_run: bool = False) ->
             raise StepFailed(message)
         log.warn(f"DEM not present yet ({cfg.dem_path}); stage B would create it")
 
-    granules = stack["granules"]
+    sel = cfg.selected_dates(stack)
+    granules = [g for g in stack["granules"] if g["date"] in set(sel)]
+    if len(granules) != len(stack["granules"]):
+        log.info(f"gslc.dates -> {sel} of "
+                 f"{len(stack['granules'])} stack date(s)")
     log.info(f"generating GSLC for {len(granules)} date(s), frequencies {cfg.frequencies}, "
              f"pols {cfg.polarizations}")
 

@@ -1,0 +1,51 @@
+# Coregistration defaults for nisar_coreg.py.
+#
+# Every value here is the one used by the validated Nepal GLOF runs (full-tile RSLC benchmark and crop v2; see
+# docs/COMPARISON.md). A case config may override any key by repeating its section, e.g.
+#     rslc: {dense_offsets: {skip_range: 64, skip_azimuth: 64}}
+# nisar_coreg.py records the effective values in <stack>/params.json and refuses to continue a stack whose values
+# changed; set `tag:` in the case config to start a separately named stack instead.
+
+inputs:
+  rslc_dir: L1_RSLC          # relative to workdir; files must be named NISAR_L1_<tier>_RSLC_*_<YYYYMMDD>T*.h5
+  tier: PR                   # PR provisional / UR urgent response
+  frequency: A
+  polarization: HH
+
+dem:
+  path: aux/dem/dem_{case}.tif   # relative to workdir; staged once by the prepare stage if missing
+  source: NISAR                  # ellipsoidal heights; needs urs.earthdata.nasa.gov in ~/.netrc
+  buffer_deg: 0.15
+
+crop_buffers:                # tools/rslc_subset.py, radar-domain window around the AOI, zero Doppler
+  buffer_az_lines: 1000      # sized for ISCE3's ionosphere kernel; kept although the ionosphere now comes from GUNW
+  buffer_range_m: 12500
+  buffer_px: 500             # ~5x the dense-offsets dead band at the window edge
+
+rslc:                        # ISCE3 insar stages that coregister. Looks are fixed at 1x1: no coregistration stage uses them.
+  rdr2geo: {threshold: 1.0e-7, numiter: 25, extraiter: 10}
+  geo2rdr: {threshold: 1.0e-8, maxiter: 25}
+  coarse_resample: {lines_per_tile: 1000, columns_per_tile: 1000}
+  dense_offsets:             # ampcor. GUNW production uses window 64 rg x 96 az, half search 32x32, skip 75x75
+    enabled: true
+    window_range: 64
+    window_azimuth: 64
+    half_search_range: 20
+    half_search_azimuth: 20
+    skip_range: 32
+    skip_azimuth: 32
+  # rubbersheet: ISCE3 installed defaults, not passed by the driver and so not settable here: median filter 9x9,
+  #   culling threshold 0.75, mask refine 5 neighbours / 5 px, fill_smoothed 1 iteration kernel 3, linear
+  #   interpolation, no azimuth filter, boxcar 5x5. (GUNW: threshold 3, 15 iterations kernel 13, idw, azimuth mean 31.)
+  fine_resample: {lines_per_tile: 100, columns_per_tile: 0}
+  crossmul: {flatten: true, oversample: 2}   # the 1x1 RIFG each pair also writes
+
+gslc:                        # mode GSLC: each date geocoded independently onto one pinned map grid (not registered)
+  frequencies: [A]
+  posting_m: 5
+
+run:
+  jobs: 2                    # units in parallel
+  prune_scratch: true        # delete a pair's ISCE3 scratch after its outputs are verified and hard-linked out
+  min_free_gb: 30            # a unit does not start unless its scratch estimate + this margin is free
+  block_budget_mb: 256       # memory per streaming block (sets rdr2geo/geo2rdr/dense_offsets/crossmul block heights)

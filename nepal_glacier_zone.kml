@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2" xmlns:gx="http://www.google.com/kml/ext/2.2" xmlns:kml="http://www.opengis.net/kml/2.2" xmlns:atom="http://www.w3.org/2005/Atom">
+<Document id="document">
+	<name>nepal_glacier_zone</name>
+	<gx:CascadingStyle kml:id="__managed_style_029FA946FE41933702DB_highlight">
+		<styleUrl>https://earth.google.com/balloon_components/base/1.1.0.0/card_template.kml#main</styleUrl>
+		<Style>
+			<IconStyle>
+				<scale>1.2</scale>
+				<Icon>
+					<href>https://earth.google.com/earth/document/icon?color=1976d2&amp;id=2000&amp;scale=4</href>
+				</Icon>
+				<hotSpot x="64" y="128" xunits="pixels" yunits="insetPixels"/>
+			</IconStyle>
+			<LabelStyle>
+			</LabelStyle>
+			<LineStyle>
+				<color>ff2dc0fb</color>
+				<width>6</width>
+			</LineStyle>
+			<PolyStyle>
+				<color>40ffffff</color>
+			</PolyStyle>
+			<BalloonStyle>
+			</BalloonStyle>
+		</Style>
+	</gx:CascadingStyle>
+	<gx:CascadingStyle kml:id="__managed_style_029FA946FE41933702DB_normal">
+		<styleUrl>https://earth.google.com/balloon_components/base/1.1.0.0/card_template.kml#main</styleUrl>
+		<Style>
+			<IconStyle>
+				<Icon>
+					<href>https://earth.google.com/earth/document/icon?color=1976d2&amp;id=2000&amp;scale=4</href>
+				</Icon>
+				<hotSpot x="64" y="128" xunits="pixels" yunits="insetPixels"/>
+			</IconStyle>
+			<LabelStyle>
+			</LabelStyle>
+			<LineStyle>
+				<color>ff2dc0fb</color>
+				<width>4</width>
+			</LineStyle>
+			<PolyStyle>
+				<color>40ffffff</color>
+			</PolyStyle>
+			<BalloonStyle>
+			</BalloonStyle>
+		</Style>
+	</gx:CascadingStyle>
+	<StyleMap id="__managed_style_029FA946FE41933702DB">
+		<Pair>
+			<key>normal</key>
+			<styleUrl>#__managed_style_029FA946FE41933702DB_normal</styleUrl>
+		</Pair>
+		<Pair>
+			<key>highlight</key>
+			<styleUrl>#__managed_style_029FA946FE41933702DB_highlight</styleUrl>
+		</Pair>
+	</StyleMap>
+	<Placemark id="01FD364A1041933702BF">
+		<name>glacier_zone</name>
+		<LookAt>
+			<longitude>85.5241455460541</longitude>
+			<latitude>28.28104400278598</latitude>
+			<altitude>4896.62354380706</altitude>
+			<heading>163.9562973056543</heading>
+			<tilt>76.64335273085125</tilt>
+			<gx:fovy>30</gx:fovy>
+			<range>13206.81862015044</range>
+			<altitudeMode>absolute</altitudeMode>
+		</LookAt>
+		<styleUrl>#__managed_style_029FA946FE41933702DB</styleUrl>
+		<Polygon>
+			<outerBoundaryIs>
+				<LinearRing>
+					<coordinates>
+						85.52818463354157,28.27849169894576,0 85.52969851550057,28.2829298896583,0 85.52810798901029,28.28967805836762,0 85.52670135847208,28.29133078316286,0 85.52657521498651,28.29027697503694,0 85.52651493764623,28.28976421444944,0 85.52651990761794,28.28946683833232,0 85.52626338355961,28.28922191813149,0 85.52590443684986,28.28831891062383,0 85.52419131778515,28.28669860727227,0 85.52262936669923,28.28584659657884,0 85.52122290132189,28.28346584763573,0 85.5219398575061,28.28210727366553,0 85.52394560514547,28.2809307629759,0 85.52818463354157,28.27849169894576,0 
+					</coordinates>
+				</LinearRing>
+			</outerBoundaryIs>
+		</Polygon>
+	</Placemark>
+</Document>
+</kml>

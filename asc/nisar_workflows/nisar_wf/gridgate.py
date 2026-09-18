@@ -141,10 +141,20 @@ def run(cfg: Config, log: Logger, force: bool = False, dry_run: bool = False) ->
     res = Result(stage="gridgate")
     stack = load_stack(cfg)
 
-    dates = stack["dates"]
-    products = {d: cfg.gslc_output(d, cfg.freq_tag) for d in dates}
+    dates = cfg.selected_dates(stack)
+    # Resolve PER (date, frequency). Two things go wrong with a single lookup:
+    #   * `gslc_output(d, cfg.freq_tag)` names a combined freqAB.h5 that a
+    #     per-band run never writes;
+    #   * resolving once on frequencies[0] then reading every band out of THAT
+    #     file fails with "no /science/LSAR/GSLC/grids/frequencyB", because when
+    #     the bands are geocoded separately each band lives in its own file.
+    # Both were hit on this project. The grid gate exists to prove the bands are
+    # pixel-aligned, so it must open whichever file actually holds each band.
+    products_bf = {(d, f): cfg.resolve_gslc(d, f)
+                   for d in dates for f in cfg.frequencies}
+    products = {d: products_bf[(d, cfg.frequencies[0])] for d in dates}
 
-    missing = [str(p) for p in products.values() if not p.exists()]
+    missing = [str(p) for p in sorted(set(products_bf.values())) if not p.exists()]
     if missing:
         message = (
             "cannot run the grid gate; GSLC product(s) missing:\n"
@@ -180,7 +190,8 @@ def run(cfg: Config, log: Logger, force: bool = False, dry_run: bool = False) ->
     for freq in cfg.frequencies:
         log.info(f"frequency {freq}: reading grid definitions ({len(dates)} product(s))")
         infos: dict[str, dict] = {}
-        for date, path in products.items():
+        for date in dates:
+            path = products_bf[(date, freq)]
             info = gslc_grid_info(path, freq)
             infos[date] = info
             log.info(

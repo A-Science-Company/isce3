@@ -1,0 +1,54 @@
+# Time-series defaults for nisar_timeseries.py. A case config may override any key by repeating its section.
+# The values in effect are recorded in <output>/params.json; a run with different values is refused (set `tag:` instead).
+
+envs:                                  # stages run in the environment that has their libraries
+  isce3_python: /home/sharath/miniforge3/envs/isce3_env/bin/python    # geometry (isce3: geo2rdr, orbits)
+  ts_python: /home/sharath/miniforge3/envs/insar_ts/bin/python        # interferograms, snaphu, GUNW sampling, MintPy
+
+aoi:
+  margin_m: 2000                       # radar window = the AOI KML bounding box grown by this much on every side
+
+looks: {azimuth: 9, range: 8}          # ~40 m x 39 m on the ground; the same grid as the validated 9x8 ionosphere unwrap
+
+network:
+  max_connections: 3                   # each date is paired with its next N dates (N=3: 9 pairs for 5 dates)
+  max_temporal_baseline_days: null     # drop longer pairs; null = no limit
+  pairs: []                            # explicit ["YYYYMMDD_YYYYMMDD", ...] overrides the two keys above
+
+unwrap:                                # snaphu (snaphu-py 0.4.1)
+  cost: smooth                         # smooth | defo
+  init: mcf
+  ntiles: [3, 3]                       # tiles in azimuth, range; unwrapped independently in parallel
+  tile_overlap: [150, 150]             # overlap in multilooked pixels (~6 km); snaphu matches 2*pi offsets between
+                                       # tiles in the overlaps when it assembles them
+  nproc: 8
+  single_tile_reoptimize: false        # true = re-solve the assembled grid as one tile afterwards
+  regrow_conncomps: true
+  min_conncomp_frac: 0.01
+  nlooks: null                         # effective looks; null = azimuth x range looks x (spacing/resolution) from the RSLC
+
+corrections:                           # from the NISAR GUNW of each date pair, sampled onto our grid
+  gunw_dir: L2_GUNW                    # relative to the case workdir
+  tier_preference: [PR, UR]
+  ionosphere: true                     # unwrappedInterferogram/<pol>/ionospherePhaseScreen (80 m grid)
+  troposphere: true                    # metadata/radarGrid wet + hydrostatic TroposphericPhaseScreen (3-D cube)
+  solid_earth_tides: true              # metadata/radarGrid slantRangeSolidEarthTidesPhase (3-D cube)
+
+mintpy:
+  reference_min_coherence: 0.85        # automatic reference point: highest average coherence above this
+  unwrap_error_method: "no"            # no | bridging | phase_closure | bridging+phase_closure (MintPy)
+  weight_func: var
+  mask_dataset: connectComponent       # exclude pixels in snaphu component 0 of an interferogram from its inversion
+  mask_threshold: 0.5
+  min_temporal_coherence: 0.7
+  dem_error: false                     # 5 dates cannot separate DEM error from deformation well
+  velocity_polynomial: 1
+
+qa:
+  max_rifg_phase_diff_rad: 0.2         # our flattened interferogram vs ISCE3's RIFG (pairs with the stack reference):
+                                       # median |phase difference| on coherent pixels must be below this
+
+run:
+  block_lines_ml: 100                  # multilooked rows per processing block
+  jobs: 2                              # interferograms formed in parallel
+  mintpy_workers: 4                    # dask workers for MintPy's pixel-by-pixel inversion (speed only)

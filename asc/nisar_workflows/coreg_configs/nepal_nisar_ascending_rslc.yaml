@@ -1,0 +1,11 @@
+# Nepal GLOF event study, NISAR ascending track 98 frame 16. Validated parameters come from coreg_configs/defaults.yaml.
+case: nepal_nisar_ascending
+workdir: /home/sharath/isce3/case_studies/nepal_nisar_ascending   # holds L1_RSLC/ and aux/dem/
+
+mode: RSLC                 # RSLC | GSLC
+crop: true                 # RSLC: cut every RSLC to the AOI before coregistration. GSLC: clip the output grid to the AOI bbox.
+aoi_kml: /home/sharath/nisar_downloader/glof_bigger_aoi.kml
+
+reference_date: null       # null -> the middle date of the selected dates
+start_date: null           # null -> earliest RSLC on disk. Only selects files already in L1_RSLC; never downloads.
+end_date: null             # null -> latest RSLC on disk

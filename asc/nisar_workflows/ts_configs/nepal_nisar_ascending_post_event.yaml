@@ -1,0 +1,15 @@
+# Nepal GLOF, ascending T98/F16: event-spanning and post-event pairs (event 2026-08-26). Parameters: ts_configs/defaults.yaml.
+# Pairs: 0819_0831 (spans the event), 0819_0912 (spans the event), 0831_0912 (post-event only), with interferograms, coherence,
+# unwrapped phase and GUNW corrections. MintPy also runs (3 dates): its displacement per date (relative to 0819) is the
+# useful product; its "velocity" across a step event has no physical meaning.
+coreg_config: coreg_configs/nepal_nisar_ascending_rslc.yaml
+name: post_event
+aoi_kml: /home/sharath/nisar_downloader/glof_bigger_aoi.kml
+start_date: 20260819
+end_date: 20260912
+reference_lalo: [28.32822, 85.37753]            # use the same stable point as the pre-event run once chosen
+
+# Relaxed inversion for the glacier zone (2026-09-16): snaphu puts 99 % of the ice pixels in component 0, so the default
+# connectComponent mask removed them from every interferogram and only 9 of 670 were inverted at all. With the mask off,
+# every pixel is inverted and temporal coherence does the filtering instead.
+mintpy: {mask_dataset: "no", min_temporal_coherence: 0.3}

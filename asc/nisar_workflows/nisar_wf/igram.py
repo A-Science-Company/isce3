@@ -315,30 +315,48 @@ def form_pair(ref_path: Path, sec_path: Path, freq: str, pol: str,
     }
 
 
-def coherence_stats(coh_path: Path) -> dict:
+def coherence_stats(coh_path: Path, n_samples: int = 1) -> dict:
     """
-    Median coherence and the >0.3 fraction, read back from the written raster.
+    Median coherence and the >0.3 fraction, from a DECIMATED read.
 
-    This reads the whole MULTILOOKED raster (56 MB at 80 m), never a GSLC. The
-    "never load a full raster" rule is about the 3.4 GiB L2 products.
+    This used to do `ReadAsArray()` on the whole raster, justified by a comment
+    saying it was "56 MB at 80 m". That assumption dies with the looks: at 1x1
+    on the freq A geogrid the coherence is 62800 x 60600 float32 = 15.2 GB, and
+    `a[fin]` then copies it again -- measured 29.9 GB anon-RSS and an OOM kill
+    on a 31 GB box, AFTER the interferogram had already been formed.
+
+    GDAL's buf_xsize/buf_ysize decimate during the read, so peak memory is the
+    OUTPUT size regardless of the raster. Capped at ~4 Mpx, which is far more
+    than a median or a fraction needs.
+
+    `n_samples` is the number of independent samples per coherence estimate
+    (looks_y*looks_x, or coherence_window**2 when the sliding window is used).
+    The decorrelated floor is derived from it rather than hardcoded, since it is
+    what tells you whether a low value is real or just the estimator bias.
     """
     from osgeo import gdal
 
     gdal.UseExceptions()
     ds = gdal.Open(str(coh_path))
-    a = ds.GetRasterBand(1).ReadAsArray()
+    W, L = ds.RasterXSize, ds.RasterYSize
+    step = max(1, int(np.sqrt(W * L / 4e6)))
+    a = ds.GetRasterBand(1).ReadAsArray(
+        buf_xsize=max(1, W // step), buf_ysize=max(1, L // step))
     ds = None
     fin = np.isfinite(a)
     if not fin.any():
         return {"median": None, "frac_gt_0.3": None, "valid_fraction": 0.0}
     v = a[fin]
+    n = max(1, int(n_samples))
     return {
         "median": round(float(np.median(v)), 4),
         "frac_gt_0.3": round(float((v > 0.3).mean()), 4),
         "valid_fraction": round(float(fin.mean()), 4),
-        # For fully decorrelated signal E[|gamma|] = sqrt(pi)/(2 sqrt(L)); water
-        # sitting on this floor is what the unwrap stage's nlooks is read from.
-        "decorrelated_floor_L32": round(float(np.sqrt(np.pi) / (2 * np.sqrt(32.0))), 4),
+        "decimation_step": step,
+        # For fully decorrelated signal E[|gamma|] = sqrt(pi)/(2 sqrt(N)).
+        # A value at this floor is NOISE, not partial correlation.
+        "n_samples": n,
+        "decorrelated_floor": round(float(np.sqrt(np.pi) / (2 * np.sqrt(n))), 4),
     }
 
 
@@ -346,7 +364,7 @@ def pair_list(cfg: Config, stack: dict) -> list[tuple[str, str]]:
     """Explicit `igram.pairs`, else every consecutive date pair."""
     if cfg.igram.pairs:
         out = []
-        known = set(stack["dates"])
+        known = set(cfg.selected_dates(stack))
         for p in cfg.igram.pairs:
             if len(p) != 2:
                 raise StepFailed(f"igram.pairs entry {p} must be [reference, secondary]")
@@ -359,7 +377,7 @@ def pair_list(cfg: Config, stack: dict) -> list[tuple[str, str]]:
                     )
             out.append((ref, sec))
         return out
-    dates = list(stack["dates"])
+    dates = cfg.selected_dates(stack)
     return [(dates[i], dates[i + 1]) for i in range(len(dates) - 1)]
 
 
@@ -368,7 +386,8 @@ def pair_paths(cfg: Config, ref: str, sec: str) -> dict:
     ic = cfg.igram
     freq, pol = cfg.igram_freq, cfg.igram_pol
     d = cfg.root / ic.pair_dir_template.format(ref=ref, sec=sec)
-    prefix = d / ic.prefix_template.format(freq=freq, pol=pol)
+    prefix = d / ic.prefix_template.format(freq=freq, pol=pol,
+                                           ly=ic.looks_y, lx=ic.looks_x)
     return {
         "dir": d,
         "prefix": prefix,
@@ -376,8 +395,8 @@ def pair_paths(cfg: Config, ref: str, sec: str) -> dict:
         "coh": Path(f"{prefix}.coh.tif"),
         "nlooks": Path(f"{prefix}.nlooks.tif"),
         "amp": Path(f"{prefix}.amp.tif"),
-        "amp_ref": d / f"amp_{freq}_{pol}_{ref}.tif",
-        "amp_sec": d / f"amp_{freq}_{pol}_{sec}.tif",
+        "amp_ref": d / f"amp_{freq}_{pol}_{ic.looks_y}x{ic.looks_x}_{ref}.tif",
+        "amp_sec": d / f"amp_{freq}_{pol}_{ic.looks_y}x{ic.looks_x}_{sec}.tif",
     }
 
 
@@ -483,7 +502,7 @@ def run(cfg: Config, log: Logger, force: bool = False, dry_run: bool = False) ->
              f"(rows x cols)  -> {len(pairs)} pair(s)")
 
     # ---- preconditions -------------------------------------------------
-    products = {d: cfg.gslc_output(d, cfg.freq_tag) for d in stack["dates"]}
+    products = {d: cfg.resolve_gslc(d, freq) for d in cfg.selected_dates(stack)}
     missing = [str(p) for d, p in products.items() if not p.exists()]
     if missing and not dry_run:
         raise StepFailed(
@@ -545,15 +564,19 @@ def run(cfg: Config, log: Logger, force: bool = False, dry_run: bool = False) ->
             {"ref": p["amp_ref"], "sec": p["amp_sec"]} if ic.per_date_amplitude else {},
             ic.block_rows, log, ic.coherence_window,
         )
-        info["coherence"] = coherence_stats(p["coh"])
+        _ic = cfg.igram
+        n_samp = (_ic.looks_y * _ic.looks_x
+                  if _ic.looks_y * _ic.looks_x >= _ic.coherence_window ** 2
+                  else _ic.coherence_window ** 2)
+        info["coherence"] = coherence_stats(p["coh"], n_samples=n_samp)
         log.info(f"    grid {info['length']} x {info['width']}  "
                  f"posting {info['posting_m'][0]:g} x {info['posting_m'][1]:g} m  "
                  f"EPSG:{info['epsg']}  origin "
                  f"({info['geotransform'][0]:.1f}, {info['geotransform'][3]:.1f})")
         c = info["coherence"]
         log.info(f"    coherence: median {c['median']}  >0.3 {c['frac_gt_0.3']}  "
-                 f"valid {c['valid_fraction']}  (decorrelated floor at L=32 is "
-                 f"{c['decorrelated_floor_L32']})")
+                 f"valid {c['valid_fraction']}  (decorrelated floor at N="
+                 f"{c['n_samples']} is {c['decorrelated_floor']})")
         report[f"{ref}_{sec}"] = info
         outputs += [str(f) for f in expected_outputs(cfg, ref, sec)]
 

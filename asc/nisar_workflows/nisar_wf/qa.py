@@ -436,8 +436,8 @@ def run(cfg: Config, log: Logger, force: bool = False, dry_run: bool = False) ->
 
     # ---------------- GSLC products ----------------
     comparison: dict[str, list] = {}
-    for date in stack["dates"]:
-        path = cfg.gslc_output(date, cfg.freq_tag)
+    for date in cfg.selected_dates(stack):
+        path = cfg.resolve_gslc(date, cfg.frequencies[0])
         if not path.exists():
             log.warn(f"GSLC for {date} not found ({path.name}); skipping its quicklook")
             continue

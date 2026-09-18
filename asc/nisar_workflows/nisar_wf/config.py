@@ -252,6 +252,14 @@ class GslcConfig:
     orbit_files: dict[str, str] = field(default_factory=dict)
     tec_files: dict[str, str] = field(default_factory=dict)
 
+    #: Restrict geocoding to these acquisition dates (YYYYMMDD). Empty -> every
+    #: date in stack.json. Geocoding is per-date and independent, so a subset
+    #: now can be topped up later without redoing anything. The PINNED geogrid
+    #: is unaffected -- it lives in stack.json, fixed at ingest from the union
+    #: of ALL footprints, so a subset lands on the same lattice and stays
+    #: pixel-aligned with dates geocoded afterwards.
+    dates: list[str] = field(default_factory=list)
+
     def validate(self) -> list[str]:
         warnings: list[str] = []
         if not self.flatten:
@@ -403,7 +411,12 @@ class IgramConfig:
     per_date_amplitude: bool = True
     pairs: list[list[str]] = field(default_factory=list)
     pair_dir_template: str = "pairs/{ref}_{sec}/trackG"
-    prefix_template: str = "ifg_{freq}_{pol}"
+    #: {ly}/{lx} are the looks. They are in the name because they CHANGE THE
+    #: OUTPUT: a re-run at different looks writes a different grid, and without
+    #: them in the identity it silently overwrites the previous product and
+    #: passes any exists() check. This project has hit that failure mode six
+    #: times; the looks belong in the filename.
+    prefix_template: str = "ifg_{freq}_{pol}_{ly}x{lx}"
 
     def validate(self, frequencies: list[str], polarizations: list[str]) -> list[str]:
         warnings: list[str] = []
@@ -593,6 +606,297 @@ class OverlayConfig:
         return warnings
 
 
+# --------------------------------------------------------------------------
+# Track R -- RSLC coregistration in radar coordinates (nisar.workflows.insar)
+# --------------------------------------------------------------------------
+@dataclass
+class Looks:
+    """
+    Multilook factors in RADAR geometry, consumed at `crossmul`.
+
+    `azimuth` multiplies the along-track spacing; `range` multiplies the SLANT
+    range spacing, so the ground-range cell is `range * slantRangeSpacing /
+    sin(incidence)` -- which is exactly `range * sceneCenterGroundRangeSpacing`.
+    """
+
+    azimuth: int = 1
+    range: int = 1
+
+
+@dataclass
+class TrackRConfig:
+    """
+    Track R -- the conventional reference-scene chain, all in radar coordinates:
+
+        rdr2geo -> geo2rdr -> coarse_resample -> dense_offsets -> rubbersheet
+                -> fine_resample -> crossmul   [-> filter -> unwrap -> geocode]
+
+    Two properties drive every sizing decision here:
+
+    1. **The reference image is never resampled.** Only the secondary is, which
+       is what Track R buys over Track G's geocode-to-a-pinned-grid.
+
+    2. **Looks are consumed at `crossmul`, the LAST stage.** Every stage before
+       it runs at full radar-grid resolution, so raising `looks` does not reduce
+       coregistration cost at all -- neither RAM, nor scratch, nor runtime.
+       `rdr2geo` alone writes x/y/z as Float64 over the whole reference grid.
+
+    `product_type` decides which stages run (nisar/workflows/insar.py):
+       RIFG -> D1-D8 + D14   (coregistration + crossmul; NO unwrap)
+       RUNW -> + phase unwrap
+       GUNW -> + geocode
+    RIFG is the right target on a memory-bounded box: it is the whole
+    coregistration chain, and it stops before snaphu.
+    """
+
+    enabled: bool = True
+
+    #: Frequency to coregister. One only -- the chain is per-frequency and the
+    #: scratch cost of the other band is not shared.
+    frequency: str = "B"
+    #: Polarization for crossmul. HH is the only co-pol in these DHDH granules.
+    polarization: str = "HH"
+
+    #: RIFG | RUNW | GUNW | RIFG_RUNW_GUNW. See the class docstring.
+    product_type: str = "RIFG"
+
+    #: Per-frequency multilook, applied at crossmul. Keyed by frequency so a
+    #: single config can carry the right looks for both bands: the two have the
+    #: same azimuth spacing but an 8x different range spacing, so one shared
+    #: (azimuth, range) pair cannot be correct for both.
+    looks: dict[str, Looks] = field(
+        default_factory=lambda: {"A": Looks(5, 5), "B": Looks(9, 1)}
+    )
+
+    #: Empty -> every consecutive date pair, matching igram.pairs semantics.
+    pairs: list[list[str]] = field(default_factory=list)
+
+    #: Refuse to start unless this much disk is free. rdr2geo + geo2rdr +
+    #: two resampled SLCs is ~21 GB per pair on freq B and ~170 GB on freq A.
+    min_free_gb: float = 60.0
+
+    #: Hard stop on a frequency whose scratch cost cannot fit. Set false only
+    #: if you have deliberately checked the disk.
+    enforce_disk_gate: bool = True
+
+    # -- stage knobs, mapped 1:1 onto the installed insar schema -------------
+    rdr2geo_threshold: float = 1.0e-7
+    rdr2geo_numiter: int = 25
+    rdr2geo_extraiter: int = 10
+    rdr2geo_lines_per_block: int = 1000
+
+    geo2rdr_threshold: float = 1.0e-8
+    geo2rdr_maxiter: int = 25
+    geo2rdr_lines_per_block: int = 1000
+
+    #: Memory budget per streaming block, in MB. Block heights for rdr2geo,
+    #: geo2rdr, dense_offsets and crossmul are DERIVED from this and the
+    #: frequency's range width, because a fixed `lines_per_block` costs 8x more
+    #: on freq A (54244 samples) than freq B (6781) and OOMs a small box.
+    block_budget_mb: float = 256.0
+
+    #: dense_offsets is ampcor -- the data-driven refinement Track G has no
+    #: equivalent for. Disabling it forces rubbersheet AND fine_resample off,
+    #: and crossmul then falls back to the coarse-resampled secondary.
+    dense_offsets_enabled: bool = True
+    dense_offsets_lines_per_block: int = 1000
+    window_range: int = 64
+    window_azimuth: int = 64
+    half_search_range: int = 20
+    half_search_azimuth: int = 20
+    skip_range: int = 32
+    skip_azimuth: int = 32
+
+    coarse_lines_per_tile: int = 1000
+    coarse_columns_per_tile: int = 1000
+    fine_lines_per_tile: int = 100
+    fine_columns_per_tile: int = 0
+
+    crossmul_flatten: bool = True
+    crossmul_oversample: int = 2
+    crossmul_lines_per_block: int = 1024
+    common_band_range_filter: bool = False
+    common_band_azimuth_filter: bool = False
+
+    gpu_enabled: bool = False
+
+    # -- phase unwrapping (needed ONLY to reach the ionosphere stage) --------
+    #
+    # These looks are INDEPENDENT of `looks` above. unwrap.py:122-135 re-runs
+    # crossmul from the coregistered SLCs at these factors, so the RUNW grid
+    # gets a FRESHLY COMPUTED coherence -- it does not decimate the RIFG's.
+    # That is what lets the RIFG stay at 1x1 (where coherence is degenerately
+    # 1.0) while the unwrapped product still has a real coherence to unwrap on.
+    #
+    # It is also a hard memory constraint: unwrap.py:278-279 open_raster()s the
+    # WHOLE interferogram and coherence. At 1x1 on freq A that is 23.1 + 11.5 =
+    # 34.6 GB, over this box's 31 GB. At 4x4 it is ~2.2 GB.
+    phase_unwrap_range_looks: int = 4
+    phase_unwrap_azimuth_looks: int = 4
+    unwrap_algorithm: str = "snaphu"
+    #: snaphu peak RAM is per-TILE x nproc, measured at 385 bytes/pixel.
+    #: On the 13300 x 13561 RUNW grid: [4,4] gives 13.06 Mpx tiles = 5.03 GB per
+    #: process, 40.2 GB across 8 -- an OOM. [8,8] gives 3.74 Mpx = 1.44 GB each,
+    #: 11.5 GB total.
+    unwrap_ntiles: list[int] = field(default_factory=lambda: [8, 8])
+    unwrap_tile_overlap: list[int] = field(default_factory=lambda: [128, 128])
+    unwrap_nproc: int = 8
+    #: phase_unwrap.bridge stitches disconnected components AFTER snaphu.
+    #: unwrap.py:356 does `dst_h5[unw_path][()]` -- a WHOLE-array read of the
+    #: unwrapped phase -- then bridge_unwrapped_phase adds a bool mask and an
+    #: int32 label array. On a 1x1 frequency A grid (2886 Mpx) that is
+    #: 11.5 + 2.9 + 11.5 = ~26 GB minimum, and it happens AFTER snaphu has
+    #: already run for hours. Turn it off for full-resolution unwraps.
+    unwrap_bridge_enabled: bool = True
+
+    #: Effective looks handed to snaphu. Leave null and ISCE3 derives it at
+    #: unwrap.py:563 as `rg_spac * az_spac / (rg_res * az_res)` -- reading the
+    #: spacings from the RIFG's OWN interferogram group. That grid is set by
+    #: `crossmul` looks, NOT by phase_unwrap looks, so at crossmul 1x1 it
+    #: computes the effective looks of the 1x1 grid (0.619 here, because the
+    #: SLC is oversampled relative to its resolution cell) and then hands that
+    #: to snaphu, which rejects anything < 1:
+    #:     ValueError: nlooks must be >= 1, instead got 0.6189996726516942
+    #: The array actually being unwrapped is the 4x4 re-multilook, whose
+    #: effective looks is 16x that = 9.904. Set it explicitly whenever
+    #: crossmul looks and phase_unwrap looks differ.
+    unwrap_nlooks: float | None = None
+
+    #: Path to an existing RIFG, for running `python -m nisar.workflows.unwrap`
+    #: standalone against a completed coregistration instead of repeating it.
+    unwrap_crossmul_path: str | None = None
+
+    #: MUST stay false whenever ntiles != [1,1]. snaphu-py's post-processing
+    #: "re-optimize using a SINGLE tile" pass undoes the entire memory benefit
+    #: of tiling: 180.4 Mpx x 385 B = 69 GB, well over this box.
+    #: Cost of false: connected-component labels come from the tiled solution
+    #: and its stitching, so seams matter more.
+    unwrap_single_tile_reoptimize: bool = False
+    #: Also false -- regrow_conncomps relabels "using a single tile" too, so it
+    #: carries the same unbounded full-grid cost.
+    unwrap_regrow_conncomps: bool = False
+
+    # -- ionosphere: split-spectrum -----------------------------------------
+    #
+    # GATED ON RUNW. insar.py:120-124 requires 'RUNW' in out_paths, so with
+    # product_type RIFG this stage is skipped SILENTLY -- no error, no output.
+    #
+    # main_side_band uses frequencies A and B directly. It is the right method
+    # for NISAR DHDH data: A and B share a starting range and their range
+    # spacings are in an exact 8:1 ratio, so decimating A onto B is exact.
+    # split_main_band instead splits A's own 40 MHz into sub-bands, which costs
+    # two extra full-resolution unwraps and ~92 GB of sub-band SLCs, and is
+    # noisier here.
+    #
+    # Only frequency A goes in `list_of_frequencies`: ionosphere.py builds the
+    # frequency B pair itself by decimating frequency A's geo2rdr/rubbersheet
+    # offsets, so a second Track R run on freq B is NOT required.
+    ionosphere_enabled: bool = False
+    ionosphere_spectral_diversity: str = "main_side_band"
+    ionosphere_lines_per_block: int = 1000
+    #: Dispersive/non-dispersive separation amplifies unwrapped-phase noise by
+    #: ~17x for this A/B pair (40 MHz vs 5 MHz, only 54.5 MHz apart). Filtering
+    #: is not optional here -- unfiltered, the estimate is worse than none.
+    ionosphere_filter_enabled: bool = True
+    ionosphere_filter_coherence_threshold: float = 0.5
+    ionosphere_median_filter_size: int = 15
+
+    pair_dir_template: str = "pairs/{ref}_{sec}/trackR"
+
+    def looks_for(self, freq: str) -> Looks:
+        """Looks for one frequency, defaulting to 1x1 rather than guessing."""
+        lk = self.looks.get(freq)
+        if lk is None:
+            raise ConfigError(
+                f"track_r.looks has no entry for frequency '{freq}'. "
+                f"Present: {sorted(self.looks)}. Add one -- the correct looks "
+                f"differ by ~8x in range between freq A and freq B."
+            )
+        return lk
+
+    def validate(self) -> list[str]:
+        warnings: list[str] = []
+
+        if self.frequency not in VALID_FREQUENCIES:
+            raise ConfigError(
+                f"track_r.frequency '{self.frequency}' invalid; "
+                f"choose one of {VALID_FREQUENCIES}"
+            )
+        if self.polarization not in VALID_POLS:
+            raise ConfigError(
+                f"track_r.polarization '{self.polarization}' invalid; "
+                f"choose from {VALID_POLS}"
+            )
+
+        valid_types = ("RIFG", "RUNW", "GUNW", "RIFG_RUNW_GUNW", "ROFF", "GOFF", "ROFF_GOFF")
+        if self.product_type not in valid_types:
+            raise ConfigError(
+                f"track_r.product_type '{self.product_type}' invalid; "
+                f"choose from {list(valid_types)}"
+            )
+
+        for freq, lk in self.looks.items():
+            if freq not in VALID_FREQUENCIES:
+                raise ConfigError(
+                    f"track_r.looks has an entry for '{freq}', which is not a "
+                    f"valid frequency {VALID_FREQUENCIES}"
+                )
+            if int(lk.azimuth) < 1 or int(lk.range) < 1:
+                raise ConfigError(
+                    f"track_r.looks.{freq} must have azimuth >= 1 and range >= 1 "
+                    f"(got azimuth={lk.azimuth}, range={lk.range})"
+                )
+
+        # The knob exists, so guard the failure mode the plan documents.
+        if self.product_type in ("RUNW", "GUNW", "RIFG_RUNW_GUNW"):
+            warnings.append(
+                f"track_r.product_type '{self.product_type}' runs phase unwrapping. "
+                f"On a memory-bounded box use RIFG: it is the whole coregistration "
+                f"chain and stops before snaphu."
+            )
+
+        if self.ionosphere_enabled and self.product_type not in (
+                "RUNW", "GUNW", "RIFG_RUNW_GUNW"):
+            raise ConfigError(
+                f"track_r.ionosphere_enabled is true but product_type is "
+                f"'{self.product_type}'. insar.py:120-124 gates the ionosphere "
+                f"stage on 'RUNW' in out_paths, so it would be SKIPPED SILENTLY "
+                f"-- no error and no output. Set product_type: RUNW."
+            )
+
+        valid_sd = ("split_main_band", "main_side_band", "main_diff_ms_band",
+                    "main_diff_low_high_subband")
+        if self.ionosphere_spectral_diversity not in valid_sd:
+            raise ConfigError(
+                f"track_r.ionosphere_spectral_diversity "
+                f"'{self.ionosphere_spectral_diversity}' invalid; "
+                f"choose from {list(valid_sd)}"
+            )
+
+        for name in ("phase_unwrap_range_looks", "phase_unwrap_azimuth_looks"):
+            if int(getattr(self, name)) < 1:
+                raise ConfigError(f"track_r.{name} must be >= 1")
+
+        if not self.dense_offsets_enabled:
+            warnings.append(
+                "track_r.dense_offsets_enabled is false, which forces rubbersheet "
+                "AND fine_resample off; crossmul then uses the COARSE-resampled "
+                "secondary, i.e. geometry-only coregistration with no data-driven "
+                "refinement"
+            )
+
+        if self.crossmul_oversample < 2:
+            warnings.append(
+                f"track_r.crossmul_oversample is {self.crossmul_oversample}; "
+                f"crossmul aliases the conjugate product below 2"
+            )
+
+        if self.gpu_enabled:
+            warnings.append("track_r.gpu_enabled is true; there is no CUDA device here")
+
+        return warnings
+
+
 @dataclass
 class StepToggles:
     """Per-stage on/off. The CLI's --only/--start-step/--stop-step layer on top."""
@@ -627,6 +931,7 @@ class Config:
     watermask: WaterMaskConfig = field(default_factory=WaterMaskConfig)
     unwrap: UnwrapConfig = field(default_factory=UnwrapConfig)
     overlay: OverlayConfig = field(default_factory=OverlayConfig)
+    track_r: TrackRConfig = field(default_factory=TrackRConfig)
     steps: StepToggles = field(default_factory=StepToggles)
 
     # populated by from_yaml
@@ -688,6 +993,39 @@ class Config:
         """One GSLC per date per selected-frequency-set."""
         return self.gslc_dir / f"{date}_gslc_freq{freq_tag}.h5"
 
+    def resolve_gslc(self, date: str, freq: str | None = None) -> Path:
+        """
+        The GSLC file on disk that holds `freq` for `date`.
+
+        `gslc_output` is keyed by freq_tag = the joined selected-frequency SET,
+        because stage G1 writes ONE combined product per date when several bands
+        are geocoded in a single run. But when the bands are run separately --
+        which a memory-bounded box forces, and which both this case and the AOI
+        case actually did -- each date has its own `..._gslc_freqA.h5` and
+        `..._gslc_freqB.h5`, and NO `..._gslc_freqAB.h5` ever exists.
+
+        Every stage that consumes GSLCs must therefore go through here rather
+        than calling `gslc_output(date, cfg.freq_tag)` directly. Fixing only the
+        interferogram call site left `gridgate` demanding a `freqAB.h5` that
+        could not exist, which failed a run AFTER all four products were built.
+
+        Prefers the single-band file, falls back to the combined one, and when
+        neither is present reports the single-band name, since that is what a
+        per-band run produces and therefore the actionable one.
+        """
+        if freq is not None:
+            single = self.gslc_output(date, freq)
+            if single.exists():
+                return single
+        combined = self.gslc_output(date, self.freq_tag)
+        if combined.exists():
+            return combined
+        for f in self.frequencies:
+            cand = self.gslc_output(date, f)
+            if cand.exists():
+                return cand
+        return self.gslc_output(date, freq or self.freq_tag)
+
     @property
     def igram_freq(self) -> str:
         """Frequency the interferometric stages work on. Defaults to the first selected."""
@@ -708,6 +1046,25 @@ class Config:
     @property
     def freq_tag(self) -> str:
         return "".join(sorted(self.frequencies))
+
+    def selected_dates(self, stack: dict) -> list[str]:
+        """
+        Stack dates restricted by `gslc.dates`, in stack order.
+
+        Every stage that enumerates dates MUST go through this. Filtering only
+        in the gslc stage is how a partial run produces GSLCs for two dates and
+        then fails in gridgate demanding a third that was never asked for.
+        """
+        dates = list(stack["dates"])
+        if not self.gslc.dates:
+            return dates
+        want = {str(d) for d in self.gslc.dates}
+        unknown = want - set(dates)
+        if unknown:
+            raise ConfigError(
+                f"gslc.dates names {sorted(unknown)}, not in the stack {dates}"
+            )
+        return [d for d in dates if d in want]
 
     def mkdirs(self) -> None:
         for d in (
@@ -766,6 +1123,7 @@ class Config:
         warnings += self.watermask.validate()
         warnings += self.unwrap.validate()
         warnings += self.overlay.validate()
+        warnings += self.track_r.validate()
 
         # cheap disk sanity: a GSLC is big and running out of space mid-geocode
         # wastes hours
@@ -859,6 +1217,8 @@ _NESTED = {
     "WaterMaskConfig": WaterMaskConfig,
     "UnwrapConfig": UnwrapConfig,
     "OverlayConfig": OverlayConfig,
+    "TrackRConfig": TrackRConfig,
+    "Looks": Looks,
     "StepToggles": StepToggles,
     "RadarGridCube": RadarGridCube,
     "Geo2Rdr": Geo2Rdr,
@@ -870,6 +1230,28 @@ _NESTED = {
 def _coerce(type_hint: Any, value: Any, prefix: str, unknown: list[str]) -> Any:
     """Map a YAML value onto a field, recursing into nested dataclasses."""
     hint = type_hint if isinstance(type_hint, str) else getattr(type_hint, "__name__", str(type_hint))
+
+    # dict[str, Looks] -- the per-frequency radar-geometry multilook table
+    if "dict[str, Looks]" in hint:
+        if not isinstance(value, dict):
+            raise ConfigError(
+                f"{prefix.rstrip('.')} must be a mapping of frequency -> "
+                f"{{azimuth, range}}"
+            )
+        looks_out: dict[str, Looks] = {}
+        for freq, sub in value.items():
+            if isinstance(sub, dict):
+                obj, unk = _build(Looks, sub, f"{prefix}{freq}.")
+                unknown.extend(unk)
+                looks_out[str(freq)] = obj
+            elif isinstance(sub, int):
+                looks_out[str(freq)] = Looks(int(sub), int(sub))  # scalar -> square
+            else:
+                raise ConfigError(
+                    f"{prefix}{freq} must be a mapping with azimuth/range, "
+                    f"or a single integer"
+                )
+        return looks_out
 
     # dict[str, Posting] -- the per-frequency posting table
     if "dict[str, Posting]" in hint:

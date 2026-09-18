@@ -6,3 +6,6 @@ build*/
 *.rpm
 case_studies/
 output.txt
+
+# Reports are archived in gs://s1-slc/nisar_workflow/reports/, not in git
+*.pdf
