@@ -1,0 +1,11 @@
+greenlet==3.5.6
+pillow==12.3.0
+playwright==1.62.0
+pyee==13.0.1
+pypdf==6.18.1
+typing_extensions==4.16.0
+# Playwright browser: chromium build 1234 (headless shell), installed with
+#   ~/.venvs/report-pdf/bin/python -m playwright install chromium
+# Debian 13 system libraries required by that chromium (installed with apt-get install -y --no-install-recommends):
+#   libnspr4 libnss3 libatk1.0-0t64 libatk-bridge2.0-0t64 libx11-6 libxcomposite1 libxdamage1 libxext6 libxfixes3
+#   libxrandr2 libgbm1 libxcb1 libxkbcommon0 libasound2t64 libatspi2.0-0t64 fonts-dejavu-core
