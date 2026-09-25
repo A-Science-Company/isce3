@@ -63,6 +63,12 @@ AS SPECIFIED BY THE TERMS OF ITS EAR99 NLR CLASSIFICATION.
 
 PLEASE READ THE LICENSE FILE FOUND IN THIS PACKAGE FOR FURTHER DETAILS.
 
+---
+
+## NISAR InSAR workflows (this fork)
+
+Full run instructions — every module, driver and tool with its arguments, and a recipe for each of the four
+workflows — are in [asc/nisar_workflows/README.md](asc/nisar_workflows/README.md). Quick reference:
 
 
 source /home/sharath/miniforge3/etc/profile.d/conda.sh && conda activate isce3_env

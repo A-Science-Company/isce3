@@ -245,7 +245,7 @@ Against WF1: ~10× fewer pixels, ~9× less scratch, and hours instead of ~21 h o
 | footprint polygon | parses as WKT; lies inside the source footprint | yes | yes |
 | identification times | ISO string with 9 fractional digits | yes | `2026-07-14T23:39:24.772368000` |
 | provenance attributes | all `subset_*` present | yes | yes |
-| ingest pin | geogrid derived from the subset footprint, not the full scene | smaller than the full pin | 16600 × 24600 vs 60600 × 62800 |
+| ingest pin | geogrid derived from the subset footprint, not the full scene | smaller than the full pin | 16600 × 24600 vs 60400 × 62800 |
 | inherited paths | `unwrap_crossmul_path` null; no path points into the full-tile tree | yes | yes |
 | RUNW sanity | ionosphere screen finite and non-zero; side-band coherence close to the full tile's | yes | see COMPARISON I3 |
 
