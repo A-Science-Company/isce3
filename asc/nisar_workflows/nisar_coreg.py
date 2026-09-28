@@ -58,9 +58,10 @@ from pathlib import Path
 import yaml
 
 HERE = Path(__file__).resolve().parent
-PY = sys.executable
+PY = sys.executable              # fallback; each stack uses envs.isce3_python (coreg_configs/defaults.yaml)
 EXIT_OK, EXIT_FAIL, EXIT_CONFIG, EXIT_PREREQ = 0, 1, 2, 3
 B_PER_PX = 104.4 + 12.0          # measured ISCE3 scratch model (nisar_wf/trackr.py) + RIFG, per reference pixel
+B_PER_PX_IONO = B_PER_PX + 16.9  # + the frequency-B side-band sub-run and the unwrap rasters (WF3-22), measured on crop v1
 
 
 # ============================================================================ helpers
@@ -233,6 +234,16 @@ class Coreg:
         self.jobs, self.prune, self.min_free_gb = int(r["jobs"]), bool(r["prune_scratch"]), float(r["min_free_gb"])
         self.gslc_freqs = [str(f) for f in eff["gslc"]["frequencies"]]
         self.gslc_posting = float(eff["gslc"]["posting_m"])
+        self.py = str(eff["envs"]["isce3_python"] or PY)     # drivers and the subsetter both need an isce3 environment
+        il = eff["rslc"]["interferogram"]["looks"]
+        self.ifg_looks = (int(il["azimuth"]), int(il["range"]))
+        self.unw, self.iono = eff["rslc"]["unwrap"], eff["rslc"]["ionosphere"]
+        self.unwrap_looks = (int(self.unw["azimuth"]), int(self.unw["range"]))
+        # the ionosphere solve consumes unwrapped phase, so it implies the unwrap; ISCE3 skips the stage in silence
+        # unless the product is a RUNW (nisar/workflows/insar.py), so the product type is derived, never set by hand
+        self.iono_on = bool(self.iono["enabled"])
+        self.unwrap_on = bool(self.unw["enabled"]) or self.iono_on
+        self.product_type = "RUNW" if self.unwrap_on else "RIFG"
 
         if self.mode not in ("RSLC", "GSLC"):
             errs.append(f"mode must be RSLC or GSLC (got {self.mode})")
@@ -244,6 +255,24 @@ class Coreg:
             errs.append(f"aoi_kml not found: {self.aoi_kml}")
         if self.tag is not None and not re.fullmatch(r"[A-Za-z0-9-]+", self.tag):
             errs.append(f"tag may contain only letters, digits and '-' (got {self.tag!r})")
+        if self.iono_on and self.mode != "RSLC":
+            errs.append("rslc.ionosphere applies to mode RSLC; a GSLC ionosphere is tools/gslc_ionosphere.py")
+        if self.iono_on and self.frequency != "A":
+            errs.append(f"rslc.ionosphere needs inputs.frequency A (the main band); got {self.frequency}. ISCE3 indexes "
+                        f"frequency A unconditionally and dies with KeyError: 'A' otherwise")
+        if self.unwrap_on and not self.unw["nlooks"]:
+            errs.append("rslc.unwrap.nlooks must be set (9 x 8 -> 44.57): ISCE3 derives it from the 1x1 crossmul grid "
+                        "instead of the unwrap grid, and snaphu aborts with 'nlooks must be >= 1, instead got 0.619'")
+        if self.iono_on and str(self.iono["spectral_diversity"]) not in (
+                "split_main_band", "main_side_band", "main_diff_ms_band", "main_diff_low_high_subband"):
+            errs.append(f"rslc.ionosphere.spectral_diversity {self.iono['spectral_diversity']!r} is not one of the four ISCE3 methods")
+        al = (int(eff["crop_buffers"]["align_az_looks"]), int(eff["crop_buffers"]["align_rg_looks"]))
+        if self.unwrap_on and self.crop and self.unwrap_looks != al:
+            errs.append(f"rslc.unwrap looks {self.unwrap_looks} differ from crop_buffers.align_*_looks {al}; "
+                        f"the unwrap grid would not land on the crop lattice")
+        for q in eff["gslc"]["interferogram"]["pairs"]:
+            if not re.fullmatch(r"\d{8}_\d{8}", str(q)):
+                errs.append(f"gslc.interferogram.pairs entry {q!r} must be YYYYMMDD_YYYYMMDD")
         try:
             start, end = norm_date(user.get("start_date"), "start_date"), norm_date(user.get("end_date"), "end_date")
             ref = norm_date(user.get("reference_date"), "reference_date")
@@ -268,7 +297,11 @@ class Coreg:
             errs.append(f"start_date {start} is after end_date {end}")
         self.dates = sorted(d for d in self.files if (start is None or d >= start) and (end is None or d <= end))
         if not self.dates:
-            errs.append(f"no {self.tier} RSLC in {self.rslc_dir} between {start or 'the first'} and {end or 'the last'} date")
+            present = sorted(f.name for f in self.rslc_dir.glob("*.h5")) if self.rslc_dir.is_dir() else []
+            unmatched = [n for n in present if n not in {f.name for f in self.files.values()}]
+            errs.append(f"no {self.tier} RSLC in {self.rslc_dir} between {start or 'the first'} and {end or 'the last'} date"
+                        + (f". {len(unmatched)} .h5 file(s) are there but do not match NISAR_L1_{self.tier}_RSLC_*_<YYYYMMDD>T*.h5: "
+                           f"{unmatched[:4]}{' ...' if len(unmatched) > 4 else ''} (wrong tier? renamed? set inputs.tier)" if unmatched else ""))
         elif self.mode == "RSLC" and len(self.dates) < 2:
             errs.append(f"RSLC coregistration needs at least two dates; selected {self.dates}")
 
@@ -283,7 +316,8 @@ class Coreg:
         self.secondaries = [d for d in self.dates if d != self.reference] if self.mode == "RSLC" else []
 
         area = self.aoi_name if self.crop else "fulltile"
-        suffix = f"_{self.tag}" if self.tag else ""
+        # the tier changes which granules are read, so it belongs in the name; PR is the default and stays silent
+        suffix = (f"_{self.tier}" if self.tier != defaults["inputs"]["tier"] else "") + (f"_{self.tag}" if self.tag else "")
         if self.mode == "RSLC":
             self.stack_id = f"RSLC_ref{self.reference}_{self.frequency}{self.polarization}_{area}{suffix}"
         else:
@@ -292,24 +326,60 @@ class Coreg:
         self.isce_root = self.stack_dir / "isce3"
         self.logdir = self.stack_dir / "logs"
         self.gen_cfg = self.stack_dir / ("track_r.yaml" if self.mode == "RSLC" else "track_g.yaml")
-        b = eff["crop_buffers"]
-        bsuf = "" if b == defaults["crop_buffers"] else f"_az{b['buffer_az_lines']}_rg{b['buffer_range_m']:g}m_px{b['buffer_px']}"
-        self.crop_dir = self.workdir / "crop" / f"{self.aoi_name}{bsuf}" if (self.crop and self.mode == "RSLC") else None
+        # The crop directory name carries every input that changes a crop's bytes and differs from the default, so
+        # two settings can never land in one directory: buffers, look alignment, tier and polarization.
+        b, bd, di = eff["crop_buffers"], defaults["crop_buffers"], defaults["inputs"]
+        self.align_looks = (int(b["align_az_looks"]), int(b["align_rg_looks"]))
+        bsuf = "" if all(b[k] == bd[k] for k in ("buffer_az_lines", "buffer_range_m", "buffer_px")) \
+            else f"_az{b['buffer_az_lines']}_rg{b['buffer_range_m']:g}m_px{b['buffer_px']}"
+        if self.align_looks != (bd["align_az_looks"], bd["align_rg_looks"]):
+            bsuf += f"_al{self.align_looks[0]}x{self.align_looks[1]}"
+        if self.tier != di["tier"]:
+            bsuf += f"_{self.tier}"
+        if self.polarization != di["polarization"]:
+            bsuf += f"_{self.polarization}"
+        self.crop_dir = self.workdir / "crop" / f"{self.aoi_name}{bsuf}" if self.crop else None
 
     # parameters that change output bytes; recorded once per stack / crop directory and never silently changed
     def stack_params(self) -> dict:
         p = {"mode": self.mode, "tier": self.tier, "frequency": self.frequency, "polarization": self.polarization,
              "dem": {"path": str(self.dem_path)}, "crop": self.crop}
         if self.mode == "RSLC":
-            p |= {"reference": self.reference, "rslc": self.eff["rslc"], "block_budget_mb": self.eff["run"]["block_budget_mb"]}
+            # `interferogram` is excluded for the same reason as the GSLC one: its looks are already in the RIFG
+            # filename (pair_tag), so a different value writes a different product instead of invalidating the stack.
+            # `interferogram`, `unwrap` and `ionosphere` are excluded: they do not change the coregistered SLCs or the
+            # geometry, only which extra products are written beside them. Their own identity is the product filename
+            # plus runw/params.json (screen_params), so switching them on does not invalidate a finished stack.
+            p |= {"reference": self.reference, "block_budget_mb": self.eff["run"]["block_budget_mb"],
+                  "rslc": {k: v for k, v in self.eff["rslc"].items()
+                           if k not in ("interferogram", "unwrap", "ionosphere")}}
             if self.crop:
                 p["crop_params"] = self.crop_params()
         else:
-            p |= {"gslc": self.eff["gslc"], "aoi_bbox": kml_bbox(self.aoi_kml) if self.crop else None}
+            # the igram subsection is excluded: its looks are in the interferogram filename, and changing them must not
+            # invalidate a geocoded stack that is already on disk.
+            p |= {"gslc": {k: v for k, v in self.eff["gslc"].items() if k != "interferogram"},
+                  "aoi_bbox": kml_bbox(self.aoi_kml) if self.crop else None}
+            if self.crop:
+                p["crop_params"] = self.crop_params()
         return p
 
     def crop_params(self) -> dict:
-        return {"aoi_kml_sha1": sha1_file(self.aoi_kml), "polarization": self.polarization, **self.eff["crop_buffers"]}
+        b, bd = self.eff["crop_buffers"], self.defaults["crop_buffers"]
+        # align_* are recorded only when they differ from the default, so crop directories written before the keys
+        # existed still match this gate.
+        extra = {k: b[k] for k in ("align_az_looks", "align_rg_looks") if b[k] != bd[k]}
+        if self.tier != self.defaults["inputs"]["tier"]:
+            extra["tier"] = self.tier
+        return {"aoi_kml_sha1": sha1_file(self.aoi_kml), "polarization": self.polarization,
+                **{k: b[k] for k in ("buffer_az_lines", "buffer_range_m", "buffer_px")}, **extra}
+
+    def screen_params(self) -> dict:
+        """Recorded in runw/params.json. The RUNW filename carries the product type and the unwrap grid; these are
+        the settings it does not carry but which still change the bytes of the screen."""
+        return {"product_type": self.product_type, "unwrap_looks": list(self.unwrap_looks),
+                "unwrap": {k: self.unw[k] for k in sorted(self.unw) if k != "enabled"},
+                "ionosphere": ({k: self.iono[k] for k in sorted(self.iono) if k != "enabled"} if self.iono_on else None)}
 
     def rslc(self, date: str) -> Path | None:
         return self.files.get(date)
@@ -325,23 +395,66 @@ class Coreg:
         return self.crop_dir / "status" / f"{d}.json"
 
     def stack_input(self, d):
-        return self.crop_out(d) if (self.mode == "RSLC" and self.crop) else self.rslc(d)
+        return self.crop_out(d) if self.crop else self.rslc(d)
 
     def manifest(self, d):
-        return self.stack_dir / "status" / f"{d}.json"
+        # the product type and unwrap grid are part of the unit's identity: turning the ionosphere on must not find
+        # the RIFG unit "already done", and turning it off again must not re-run the RUNW
+        suf = "" if self.product_type == "RIFG" else f"_{self.product_type}_unw{self.unwrap_looks[0]}x{self.unwrap_looks[1]}"
+        return self.stack_dir / "status" / f"{d}{suf}.json"
+
+    def igram_manifest(self, d12):
+        return self.stack_dir / "status" / f"igram_{d12}.json"
 
     # ISCE3 paths (mirror nisar_wf/trackr.pair_paths and Config.gslc_output)
     def pair_tag(self):
-        return f"{self.frequency}_{self.polarization}_1x1"
+        return f"{self.frequency}_{self.polarization}_{self.ifg_looks[0]}x{self.ifg_looks[1]}"
 
     def pair_scratch(self, sec):
         return self.isce_root / "scratch" / "trackR" / f"{self.reference}_{sec}_{self.pair_tag()}"
 
+    def out_tag(self):
+        """nisar_wf/trackr.py:267-272: the crossmul looks, plus the unwrap grid when it differs from them."""
+        t = self.pair_tag()
+        return t if self.unwrap_looks == self.ifg_looks else f"{t}_unw{self.unwrap_looks[0]}x{self.unwrap_looks[1]}"
+
     def pair_product(self, sec):
-        return self.isce_root / "pairs" / f"{self.reference}_{sec}" / "trackR" / f"RIFG_{self.reference}_{sec}_{self.pair_tag()}.h5"
+        """The delivered product: RIFG normally, RUNW once the unwrap or the ionosphere is on."""
+        tag = self.pair_tag() if self.product_type == "RIFG" else self.out_tag()
+        return self.isce_root / "pairs" / f"{self.reference}_{sec}" / "trackR" / f"{self.product_type}_{self.reference}_{sec}_{tag}.h5"
+
+    def pair_rifg(self, sec):
+        """Where the 1x1 RIFG lands. Under RUNW it is a scratch file (nisar h5_prep.py), not the delivered product,
+        but the time series gates every reference pair against it, so it is exported either way."""
+        return self.pair_product(sec) if self.product_type == "RIFG" else self.pair_scratch(sec) / "RIFG.h5"
+
+    def rifg_export(self, sec):
+        return self.stack_dir / "ifg" / f"RIFG_{self.reference}_{sec}_{self.pair_tag()}.h5"
+
+    def screen_export(self, sec):
+        return self.stack_dir / "runw" / self.pair_product(sec).name
+
+    # the ionosphere screen inside a RUNW (one path only; the frequency-B copy stays in scratch)
+    IONO_DS = "science/LSAR/RUNW/swaths/frequency{f}/interferogram/{p}/ionospherePhaseScreen"
 
     def gslc_product(self, d, f):
         return self.isce_root / "L2_GSLC" / f"{d}_gslc_freq{f}.h5"
+
+    # GSLC interferogram (Track G step 6; mirrors nisar_wf/igram.pair_paths)
+    def gslc_pairs(self) -> list[tuple[str, str]]:
+        spec = self.eff["gslc"]["interferogram"]["pairs"]
+        if not spec:
+            return [(self.dates[i], self.dates[i + 1]) for i in range(len(self.dates) - 1)]
+        return [(str(q).split("_")[0], str(q).split("_")[1]) for q in spec]
+
+    def igram_prefix(self, ref: str, sec: str) -> Path:
+        g = self.eff["gslc"]["interferogram"]
+        return (self.isce_root / "pairs" / f"{ref}_{sec}" / "trackG"
+                / f"ifg_{self.gslc_freqs[0]}_{self.polarization}_{int(g['looks_y'])}x{int(g['looks_x'])}")
+
+    def igram_outputs(self, ref: str, sec: str) -> list[Path]:
+        pre = self.igram_prefix(ref, sec)
+        return [Path(f"{pre}.{x}.tif") for x in ("igram", "coh", "nlooks", "amp")]
 
 
 def params_gate(params_file: Path, params: dict, what: str, log: Log, dry_run: bool) -> bool:
@@ -393,8 +506,9 @@ def rslc_stack_raw(cg: Coreg) -> dict:
     r = cg.eff["rslc"]
     do = r["dense_offsets"]
     raw["track_r"] = {
-        "frequency": cg.frequency, "polarization": cg.polarization, "product_type": "RIFG", "ionosphere_enabled": False,
-        "looks": {cg.frequency: {"azimuth": 1, "range": 1}},
+        "frequency": cg.frequency, "polarization": cg.polarization,
+        "product_type": cg.product_type, "ionosphere_enabled": cg.iono_on,
+        "looks": {cg.frequency: {"azimuth": cg.ifg_looks[0], "range": cg.ifg_looks[1]}},
         "pairs": [[int(cg.reference), int(s)] for s in cg.secondaries],
         "min_free_gb": cg.min_free_gb, "block_budget_mb": float(cg.eff["run"]["block_budget_mb"]),
         "rdr2geo_threshold": float(r["rdr2geo"]["threshold"]), "rdr2geo_numiter": int(r["rdr2geo"]["numiter"]),
@@ -408,13 +522,40 @@ def rslc_stack_raw(cg: Coreg) -> dict:
         "fine_columns_per_tile": int(r["fine_resample"]["columns_per_tile"]),
         "crossmul_flatten": bool(r["crossmul"]["flatten"]), "crossmul_oversample": int(r["crossmul"]["oversample"]),
     }
+    if cg.unwrap_on:
+        u = cg.unw
+        # frequency B is NOT added to the frequency list: ISCE3's ionosphere runconfig fills the side band itself,
+        # and listing it here would change what the main chain processes
+        raw["track_r"] |= {
+            "phase_unwrap_azimuth_looks": cg.unwrap_looks[0], "phase_unwrap_range_looks": cg.unwrap_looks[1],
+            "unwrap_algorithm": str(u["algorithm"]), "unwrap_nlooks": float(u["nlooks"]),
+            "unwrap_ntiles": [int(x) for x in u["ntiles"]], "unwrap_tile_overlap": [int(x) for x in u["tile_overlap"]],
+            "unwrap_nproc": int(u["nproc"]), "unwrap_bridge_enabled": bool(u["bridge_enabled"]),
+            "unwrap_single_tile_reoptimize": bool(u["single_tile_reoptimize"]),
+            "unwrap_regrow_conncomps": bool(u["regrow_conncomps"]), "unwrap_crossmul_path": None,
+        }
+    if cg.iono_on:
+        i = cg.iono
+        raw["track_r"] |= {
+            "ionosphere_spectral_diversity": str(i["spectral_diversity"]),
+            "ionosphere_lines_per_block": int(i["lines_per_block"]),
+            "ionosphere_filter_enabled": bool(i["filter_enabled"]),
+            "ionosphere_filter_coherence_threshold": float(i["filter_coherence_threshold"]),
+            "ionosphere_median_filter_size": int(i["median_filter_size"]),
+        }
     return raw
 
 
 def gslc_stack_raw(cg: Coreg) -> dict:
-    raw = isce_raw(cg, f"{cg.case}_{cg.stack_id}", cg.isce_root, [cg.rslc(d) for d in cg.dates], cg.gslc_freqs)
+    # crop: the granules are cut to the AOI first (as the validated WF4 did) and the output grid is clipped to its bbox
+    raw = isce_raw(cg, f"{cg.case}_{cg.stack_id}", cg.isce_root, [cg.stack_input(d) for d in cg.dates], cg.gslc_freqs)
     raw["geogrid"] = {"aoi_lonlat": kml_bbox(cg.aoi_kml) if cg.crop else None,
                       "posting": {f: {"x": cg.gslc_posting, "y": cg.gslc_posting} for f in cg.gslc_freqs}}
+    g = cg.eff["gslc"]["interferogram"]
+    raw["igram"] = {"enabled": bool(g["enabled"]), "freq": cg.gslc_freqs[0], "pol": cg.polarization,
+                    "looks_y": int(g["looks_y"]), "looks_x": int(g["looks_x"]),
+                    "coherence_window": int(g["coherence_window"]),
+                    "pairs": [[r, sec] for r, sec in cg.gslc_pairs()]}
     return raw
 
 
@@ -443,8 +584,21 @@ def cmd_show(cg: Coreg, a) -> int:
     if cg.crop_dir:
         print(f"crops        {cg.crop_dir}")
     print(f"DEM          {cg.dem_path} ({'present' if cg.dem_path.exists() else 'missing: prepare stages it'})")
+    if cg.mode == "RSLC":
+        print(f"interferogram ISCE3 writes one RIFG per pair at {cg.ifg_looks[0]}x{cg.ifg_looks[1]} looks "
+              f"({cg.stack_dir.name}/ifg/); science interferograms come from nisar_timeseries.py")
+    else:
+        g = cg.eff["gslc"]["interferogram"]
+        if g["enabled"]:
+            pr = " ".join(f"{r}_{x}" for r, x in cg.gslc_pairs())
+            print(f"interferogram stage igram at {g['looks_y']}x{g['looks_x']} looks, pairs: {pr}")
+        else:
+            print("interferogram off (set gslc.interferogram.enabled: true to form one after geocoding)")
+    print(f"python       {cg.py}")
     shown = {k: cg.eff[k] for k in ("inputs", "run")}
-    shown |= {"rslc": cg.eff["rslc"], **({"crop_buffers": cg.eff["crop_buffers"]} if cg.crop else {})} if cg.mode == "RSLC" else {"gslc": cg.eff["gslc"]}
+    shown |= {"rslc": cg.eff["rslc"]} if cg.mode == "RSLC" else {"gslc": cg.eff["gslc"]}
+    if cg.crop:
+        shown["crop_buffers"] = cg.eff["crop_buffers"]
     print("\nparameters in effect (coreg_configs/defaults.yaml" + (f", overridden by the case config: {sorted(cg.overrides)})" if cg.overrides else ")"))
     print(yaml.safe_dump(shown, sort_keys=False, default_flow_style=None).rstrip())
     return EXIT_OK
@@ -460,12 +614,14 @@ def cmd_status(cg: Coreg, a) -> int:
     print(f"{'date':10s} {'role':10s} {'rslc':10s} {'crop':8s} {'coreg':10s}")
     for d in cg.dates:
         r = cg.rslc(d)
-        cs = unit_state(cg.crop_manifest(d)) if (cg.crop and cg.mode == "RSLC") else "n/a"
+        cs = unit_state(cg.crop_manifest(d)) if cg.crop else "n/a"
         if cg.mode == "RSLC" and d == cg.reference:
             role, gs = "reference", "ref"
         else:
             role, gs = ("secondary" if cg.mode == "RSLC" else "date"), unit_state(cg.manifest(d))
         print(f"{d:10s} {role:10s} {sizeof(r) / 1e9:5.1f} GB   {cs:8s} {gs:10s}")
+    if cg.mode == "GSLC" and cg.eff["gslc"]["interferogram"]["enabled"]:
+        print("igram:", "  ".join(f"{r}_{x} {unit_state(cg.igram_manifest(f'{r}_{x}'))}" for r, x in cg.gslc_pairs()))
     print(f"free disk {free_bytes(cg.workdir) / 1e9:.0f} GB")
     return EXIT_OK
 
@@ -538,7 +694,7 @@ def stage_prepare(cg: Coreg, a, log: Log) -> int:
         log(f"prepare: would stage the DEM {cg.dem_path} (ingest + dem over {len(cg.dates)} RSLCs)")
         return EXIT_OK
     cfg = prepare_cfg(cg)
-    rc = run_cmd([PY, "-u", str(HERE / "run_track_r.py"), "--config", str(cfg), "--only", "ingest", "dem",
+    rc = run_cmd([cg.py, "-u", str(HERE / "run_track_r.py"), "--config", str(cfg), "--only", "ingest", "dem",
                   "--log-file", str(cg.logdir / f"prepare_{stamp()}.driver.log")], cg.logdir / f"prepare_{stamp()}.console.log")
     log(f"prepare EXIT={rc}")
     return EXIT_OK if rc == 0 else EXIT_FAIL
@@ -556,9 +712,10 @@ def crop_unit(cg: Coreg, d: str, a, log: Log) -> str:
         return "fail"
     tmp = Path(str(out) + ".part.h5")
     b = cg.eff["crop_buffers"]
-    cmd = [PY, "-u", str(HERE / "tools" / "rslc_subset.py"), "--rslc", str(src), "--out", str(tmp), "--kml", str(cg.aoi_kml),
+    cmd = [cg.py, "-u", str(HERE / "tools" / "rslc_subset.py"), "--rslc", str(src), "--out", str(tmp), "--kml", str(cg.aoi_kml),
            "--dem", str(cg.dem_path), "--polarizations", cg.polarization, "--buffer-az-lines", str(int(b["buffer_az_lines"])),
-           "--buffer-range-m", str(float(b["buffer_range_m"])), "--buffer", str(int(b["buffer_px"]))]
+           "--buffer-range-m", str(float(b["buffer_range_m"])), "--buffer", str(int(b["buffer_px"])),
+           "--align-az-looks", str(cg.align_looks[0]), "--align-rg-looks", str(cg.align_looks[1])]
     if a.dry_run:
         log(f"crop {d}: would run {' '.join(cmd)}")
         return "dry"
@@ -584,12 +741,14 @@ def crop_unit(cg: Coreg, d: str, a, log: Log) -> str:
 
 
 def stage_crop(cg: Coreg, a, log: Log) -> int:
-    if not (cg.mode == "RSLC" and cg.crop):
-        log("crop: not applicable (" + ("GSLC clips its geogrid instead" if cg.mode == "GSLC" else "crop disabled") + ")")
+    if not cg.crop:
+        log("crop: not applicable (crop disabled; the full tile is processed)")
         return EXIT_OK
     if not cg.dem_path.exists():
-        log(f"crop: DEM missing ({cg.dem_path}); run --stage prepare first")
-        return EXIT_PREREQ
+        if not a.dry_run:
+            log(f"crop: DEM missing ({cg.dem_path}); run --stage prepare first")
+            return EXIT_PREREQ
+        log(f"crop: DEM missing ({cg.dem_path}); the prepare stage would stage it before this one")
     dates = a.dates or cg.dates
     bad = [d for d in dates if d not in cg.dates]
     if bad:
@@ -610,22 +769,26 @@ def coreg_setup(cg: Coreg, a, log: Log) -> int:
     prev = read_json(setup) or {}
     if set(cg.units()) <= set(prev.get("units", [])) and cg.gen_cfg.exists() and not a.force:
         return EXIT_OK
-    if cg.mode == "RSLC":
-        dates = [cg.reference] + cg.secondaries
-        need = [d for d in dates if not unit_done(cg.crop_manifest(d))] if cg.crop else []
-        if need and a.dry_run:
-            raw = rslc_stack_raw(cg)
-            raw["granules"] = [str(cg.rslc(d)) for d in dates]
-            with tempfile.TemporaryDirectory() as td:
-                warns = write_generated(Path(td) / cg.gen_cfg.name, raw, "dry run")
-            log(f"coreg set-up: driver config validates ({len(warns)} warning(s){': ' + '; '.join(warns) if warns else ''}; "
-                f"checked with full-tile granule paths because crops are missing for {need})")
-        if need:
+    raw_fn = rslc_stack_raw if cg.mode == "RSLC" else gslc_stack_raw
+    dates = ([cg.reference] + cg.secondaries) if cg.mode == "RSLC" else list(cg.dates)
+    need = [d for d in dates if not unit_done(cg.crop_manifest(d))] if cg.crop else []
+    if need and a.dry_run:
+        raw = raw_fn(cg)
+        raw["granules"] = [str(cg.rslc(d)) for d in dates]
+        with tempfile.TemporaryDirectory() as td:
+            warns = write_generated(Path(td) / cg.gen_cfg.name, raw, "dry run")
+        log(f"coreg set-up: driver config validates ({len(warns)} warning(s){': ' + '; '.join(warns) if warns else ''}; "
+            f"checked with full-tile granule paths because crops are missing for {need})")
+    if need:
+        if not a.dry_run:
             log(f"coreg set-up: crops not ready for {need}; run --stage crop first")
             return EXIT_PREREQ
-        raw, steps = rslc_stack_raw(cg), [(["ingest", "dem"], []), (["runconfig"], ["--no-disk-gate"])]
-    else:
-        raw, steps = gslc_stack_raw(cg), [(["ingest", "dem"], [])]
+        # the config was just validated with the full-tile granules; validating it again against crop paths that do
+        # not exist yet would only fail on the missing files, so the plan continues from here
+        log(f"coreg set-up: crops not ready for {need}; the crop stage would make them first")
+        return EXIT_OK
+    steps = [(["ingest", "dem"], []), (["runconfig"], ["--no-disk-gate"])] if cg.mode == "RSLC" else [(["ingest", "dem"], [])]
+    raw = raw_fn(cg)
     if a.dry_run:
         with tempfile.TemporaryDirectory() as td:
             warns = write_generated(Path(td) / cg.gen_cfg.name, raw, f"coreg {cg.mode}, dry run")
@@ -636,7 +799,7 @@ def coreg_setup(cg: Coreg, a, log: Log) -> int:
     for w in warns:
         log(f"coreg set-up: driver warning: {w}")
     for s, extra in steps:
-        rc = run_cmd([PY, "-u", driver(cg), "--config", str(cg.gen_cfg), "--only", *s, *extra, "--log-file", str(cg.logdir / f"setup_{stamp()}.driver.log")],
+        rc = run_cmd([cg.py, "-u", driver(cg), "--config", str(cg.gen_cfg), "--only", *s, *extra, "--log-file", str(cg.logdir / f"setup_{stamp()}.driver.log")],
                      cg.logdir / f"setup_{stamp()}.console.log")
         log(f"coreg set-up {'+'.join(s)} EXIT={rc}")
         if rc != 0:
@@ -646,35 +809,65 @@ def coreg_setup(cg: Coreg, a, log: Log) -> int:
     return EXIT_OK
 
 
+def screen_ok(path: Path, ds: str) -> object:
+    """True when the ionosphere screen exists, is finite and is not identically zero (a silently skipped solve
+    writes zeros). Reads a decimated slice, never the whole raster."""
+    try:
+        import h5py
+        import numpy as np
+        with h5py.File(path, "r") as f:
+            if ds not in f:
+                return f"missing {ds}"
+            d = f[ds][::16, ::16]
+        fin = np.isfinite(d)
+        if not fin.any():
+            return "all NaN"
+        if not np.any(d[fin] != 0):
+            return "identically zero (the solve was skipped)"
+        return True
+    except Exception as e:  # noqa: BLE001
+        return f"unreadable: {e}"
+
+
 def rslc_unit(cg: Coreg, sec: str, a, log: Log) -> str:
     man = cg.manifest(sec)
     if unit_done(man) and not a.force:
         log(f"coreg {sec}: done, skip")
         return "skip"
     if a.dry_run:
-        log(f"coreg {sec}: would coregister onto {cg.reference}, verify, export, prune={cg.prune}")
+        log(f"coreg {sec}: would coregister onto {cg.reference} -> {cg.pair_product(sec).name}"
+            + (f" with the {cg.iono['spectral_diversity']} ionosphere" if cg.iono_on else "")
+            + f", verify, export, prune={cg.prune}")
         return "dry"
     st = read_json(cg.isce_root / "stack.json") or {}
     ref_shape = next((g.get("frequencies", {}).get(cg.frequency, {}).get("shape") for g in st.get("granules", []) if g.get("date") == cg.reference), None)
-    need = (ref_shape[0] * ref_shape[1] * B_PER_PX if ref_shape else 0) + cg.min_free_gb * 1e9
+    bpp = B_PER_PX_IONO if cg.iono_on else B_PER_PX
+    need = (ref_shape[0] * ref_shape[1] * bpp if ref_shape else 0) + cg.min_free_gb * 1e9
     if free_bytes(cg.workdir) < need:
         log(f"coreg {sec}: needs {need / 1e9:.0f} GB free, have {free_bytes(cg.workdir) / 1e9:.0f} GB; not started")
         return "prereq"
     ulog = cg.logdir / f"coreg_{cg.reference}_{sec}_{stamp()}.log"
     t0 = time.time()
     write_json(man, {"stage": "coreg", "unit": sec, "status": "running", "started": now(), "host": socket.gethostname(), "log": str(ulog)})
-    cmd = [PY, "-u", driver(cg), "--config", str(cg.gen_cfg), "--only", "insar", "--pair", cg.reference, sec, "--no-disk-gate",
+    cmd = [cg.py, "-u", driver(cg), "--config", str(cg.gen_cfg), "--only", "insar", "--pair", cg.reference, sec, "--no-disk-gate",
            "--log-file", str(ulog.with_suffix(".driver.log"))] + (["--force"] if a.force else [])
     rc = run_cmd(cmd, ulog)
-    sd, prod = cg.pair_scratch(sec), cg.pair_product(sec)
+    sd, prod, rifg = cg.pair_scratch(sec), cg.pair_product(sec), cg.pair_rifg(sec)
     fp = f"freq{cg.frequency}/{cg.polarization}"
     ref_slc, sec_slc = sd / f"crossmul/{fp}/reference.slc", sd / f"fine_resample_slc/{fp}/coregistered_secondary.slc"
-    checks = {"exit_code_0": rc == 0, "rifg_product": sizeof(prod) > 0, "coregistered_slc": sizeof(sec_slc) > 0,
+    checks = {"exit_code_0": rc == 0, f"{cg.product_type.lower()}_product": sizeof(prod) > 0,
+              "rifg": sizeof(rifg) > 0, "coregistered_slc": sizeof(sec_slc) > 0,
               "coregistered_size_equals_reference": sizeof(sec_slc) == sizeof(ref_slc) > 0}
+    if cg.iono_on and sizeof(prod) > 0:
+        checks["ionosphere_screen"] = screen_ok(prod, Coreg.IONO_DS.format(f=cg.frequency, p=cg.polarization))
     ok, outputs = all(checks.values()), {}
     if ok:
         o = cg.stack_dir
-        todo = [(sec_slc, o / "slc" / f"{sec}.slc"), (Path(str(sec_slc).replace(".slc", ".hdr")), o / "slc" / f"{sec}.hdr"), (prod, o / "ifg" / prod.name)]
+        # the RIFG is exported under the name the time-series gate looks for, whether or not it is the delivered product
+        todo = [(sec_slc, o / "slc" / f"{sec}.slc"), (Path(str(sec_slc).replace(".slc", ".hdr")), o / "slc" / f"{sec}.hdr"),
+                (rifg, cg.rifg_export(sec))]
+        if cg.product_type != "RIFG":
+            todo += [(prod, cg.screen_export(sec))]
         if not (o / "slc" / f"{cg.reference}.slc").exists():
             todo += [(ref_slc, o / "slc" / f"{cg.reference}.slc"), (Path(str(ref_slc).replace(".slc", ".hdr")), o / "slc" / f"{cg.reference}.hdr")]
             for comp, name in (("x", "lon"), ("y", "lat"), ("z", "hgt")):
@@ -695,7 +888,7 @@ def rslc_unit(cg: Coreg, sec: str, a, log: Log) -> str:
     pruned = False
     if ok and cg.prune:
         kept = {Path(p).stat().st_ino for p in outputs}
-        if all(p.stat().st_ino in kept for p in (sec_slc, prod)):
+        if all(p.stat().st_ino in kept for p in {sec_slc, prod, rifg}):
             shutil.rmtree(sd, ignore_errors=True)
             pruned = True
     write_json(man, {"stage": "coreg", "type": "RSLC", "unit": sec, "reference": cg.reference, "status": "ok" if ok else "failed",
@@ -703,7 +896,10 @@ def rslc_unit(cg: Coreg, sec: str, a, log: Log) -> str:
                      "host": socket.gethostname(), "log": str(ulog),
                      "inputs": {str(cg.stack_input(cg.reference)): sizeof(cg.stack_input(cg.reference)), str(cg.stack_input(sec)): sizeof(cg.stack_input(sec)),
                                 str(cg.gen_cfg): sizeof(cg.gen_cfg)},
-                     "outputs": outputs, "scratch_pruned": pruned, "code": {"git": git_rev(), "driver": "run_track_r.py --only insar"}})
+                     "outputs": outputs, "scratch_pruned": pruned, "product_type": cg.product_type,
+                     "ionosphere": {"enabled": cg.iono_on, **({"method": cg.iono["spectral_diversity"],
+                                    "unwrap_looks": list(cg.unwrap_looks)} if cg.iono_on else {})},
+                     "code": {"git": git_rev(), "driver": "run_track_r.py --only insar"}})
     log(f"coreg {sec}: {'ok' if ok else 'FAILED'} (EXIT={rc}, {time.time() - t0:.0f} s, pruned={pruned}) {checks if not ok else ''}")
     return "ok" if ok else "fail"
 
@@ -721,7 +917,7 @@ def gslc_unit(cg: Coreg, d: str, a, log: Log) -> str:
     write_json(man, {"stage": "coreg", "type": "GSLC", "unit": d, "status": "running", "started": now(), "log": str(ulog)})
     rc = 0
     for f in cg.gslc_freqs:
-        rc = rc or run_cmd([PY, "-u", driver(cg), "--config", str(cg.gen_cfg), "--only", "gslc", "--frequencies", f, "--dates", d,
+        rc = rc or run_cmd([cg.py, "-u", driver(cg), "--config", str(cg.gen_cfg), "--only", "gslc", "--frequencies", f, "--dates", d,
                             "--log-file", str(ulog.with_suffix(f".{f}.driver.log"))] + (["--force"] if a.force else []), ulog)
     prods = {f: cg.gslc_product(d, f) for f in cg.gslc_freqs}
     checks = {"exit_code_0": rc == 0, **{f"gslc_{f}": sizeof(p) > 0 for f, p in prods.items()}}
@@ -743,6 +939,9 @@ def gslc_unit(cg: Coreg, d: str, a, log: Log) -> str:
 def stage_coreg(cg: Coreg, a, log: Log) -> int:
     if not params_gate(cg.stack_dir / "params.json", cg.stack_params(), "stack", log, a.dry_run):
         return EXIT_CONFIG
+    if cg.unwrap_on and not params_gate(cg.stack_dir / "runw" / "params.json", cg.screen_params(),
+                                        "unwrapped/ionosphere products", log, a.dry_run):
+        return EXIT_CONFIG
     rc = coreg_setup(cg, a, log)
     if rc != EXIT_OK:
         return rc
@@ -758,7 +957,7 @@ def stage_coreg(cg: Coreg, a, log: Log) -> int:
     if a.dry_run or not all(unit_done(cg.manifest(u)) for u in cg.units()):
         return EXIT_FAIL if "fail" in res else (EXIT_PREREQ if "prereq" in res else EXIT_OK)
     if cg.mode == "GSLC":
-        grc = run_cmd([PY, "-u", driver(cg), "--config", str(cg.gen_cfg), "--only", "gridgate", "--frequencies", *cg.gslc_freqs,
+        grc = run_cmd([cg.py, "-u", driver(cg), "--config", str(cg.gen_cfg), "--only", "gridgate", "--frequencies", *cg.gslc_freqs,
                        "--log-file", str(cg.logdir / f"gridgate_{stamp()}.driver.log")], cg.logdir / f"gridgate_{stamp()}.console.log")
         log(f"gridgate EXIT={grc}")
         if grc != 0:
@@ -771,6 +970,58 @@ def stage_coreg(cg: Coreg, a, log: Log) -> int:
     return EXIT_OK
 
 
+# ============================================================================ stage: igram (GSLC)
+def stage_igram(cg: Coreg, a, log: Log) -> int:
+    """Map-domain interferogram from the geocoded stack (Track G step 6). RSLC interferograms are formed by
+    nisar_timeseries.py instead, from the coregistered SLCs."""
+    if cg.mode != "GSLC":
+        log("igram: not applicable (RSLC: form interferograms with nisar_timeseries.py)")
+        return EXIT_OK
+    g = cg.eff["gslc"]["interferogram"]
+    if not g["enabled"]:
+        log("igram: disabled (set gslc.interferogram.enabled: true)")
+        return EXIT_OK
+    pairs = cg.gslc_pairs()
+    if not pairs:
+        log(f"igram: no pairs to form ({len(cg.dates)} date(s) selected; an interferogram needs two)")
+        return EXIT_CONFIG
+    bad = [f"{r}_{sec}" for r, sec in pairs if r not in cg.dates or sec not in cg.dates]
+    if bad:
+        log(f"igram: pairs {bad} name dates outside the selected {cg.dates}")
+        return EXIT_CONFIG
+    missing = [d for d in sorted({d for pr in pairs for d in pr}) if not unit_done(cg.manifest(d))]
+    if missing and not a.dry_run:
+        log(f"igram: the GSLC of {missing} is not done; run --stage coreg first")
+        return EXIT_PREREQ
+    if missing:
+        log(f"igram: the GSLC of {missing} is not done; the coreg stage would make it first")
+    todo = [pr for pr in pairs if a.force or not unit_done(cg.igram_manifest(f"{pr[0]}_{pr[1]}"))]
+    if a.dry_run:
+        log(f"igram: would form {len(todo)} of {len(pairs)} pair(s) at {g['looks_y']}x{g['looks_x']} looks -> "
+            f"{cg.igram_prefix(*pairs[0]).parent.parent}")
+        return EXIT_OK
+    if not todo:
+        log(f"igram: {len(pairs)} pair(s) already done, skip")
+        return EXIT_OK
+    ulog = cg.logdir / f"igram_{stamp()}.log"
+    t0 = time.time()
+    rc = run_cmd([cg.py, "-u", driver(cg), "--config", str(cg.gen_cfg), "--only", "igram",
+                  "--log-file", str(ulog.with_suffix(".driver.log"))] + (["--force"] if a.force else []), ulog)
+    res = {}
+    for r, sec in pairs:
+        outs = {str(x): sizeof(x) for x in cg.igram_outputs(r, sec)}
+        ok = rc == 0 and all(v > 0 for v in outs.values())
+        write_json(cg.igram_manifest(f"{r}_{sec}"), {
+            "stage": "igram", "type": "GSLC", "unit": f"{r}_{sec}", "status": "ok" if ok else "failed", "exit_code": rc,
+            "note": "map-domain interferogram between two independently geocoded dates; they are not coregistered",
+            "finished": now(), "duration_s": round(time.time() - t0, 1), "log": str(ulog),
+            "inputs": {str(cg.gslc_product(d, cg.gslc_freqs[0])): sizeof(cg.gslc_product(d, cg.gslc_freqs[0])) for d in (r, sec)},
+            "outputs": outs if ok else {}, "code": {"git": git_rev(), "driver": "run_track_g.py --only igram"}})
+        res[f"{r}_{sec}"] = "ok" if ok else "fail"
+    log(f"igram summary: {res} (EXIT={rc}, {time.time() - t0:.0f} s)")
+    return EXIT_OK if all(v == "ok" for v in res.values()) else EXIT_FAIL
+
+
 # ============================================================================ main
 def detach(argv, cg: Coreg, what: str) -> int:
     session = re.sub(r"[^A-Za-z0-9_-]", "_", f"coreg_{cg.case}_{what}")[:60]
@@ -779,7 +1030,7 @@ def detach(argv, cg: Coreg, what: str) -> int:
         return EXIT_PREREQ
     cg.logdir.mkdir(parents=True, exist_ok=True)
     logf = cg.logdir / f"{what}_{stamp()}.detached.log"
-    inner = " ".join(shlex.quote(x) for x in [PY, "-u", str(Path(__file__).resolve())] + [x for x in argv if x != "--detach"])
+    inner = " ".join(shlex.quote(x) for x in [cg.py, "-u", str(Path(__file__).resolve())] + [x for x in argv if x != "--detach"])
     subprocess.run(["tmux", "new-session", "-d", "-s", session, f"{inner} > {shlex.quote(str(logf))} 2>&1; echo EXIT=$? >> {shlex.quote(str(logf))}"], check=True)
     print(f"started: tmux session {session}\n  attach: tmux attach -t {session}\n  log:    {logf}")
     return EXIT_OK
@@ -790,7 +1041,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-c", "--config", required=True, type=Path)
     ap.add_argument("command", choices=["show", "status", "progress", "run"])
-    ap.add_argument("--stage", choices=["prepare", "crop", "coreg"], help="run only this stage (default: all, in order)")
+    ap.add_argument("--stage", choices=["prepare", "crop", "coreg", "igram"],
+                    help="run only this stage (default: all, in order). igram is GSLC only")
     ap.add_argument("--dates", nargs="+", help="units to process (crop: dates; RSLC coreg: secondaries; GSLC coreg: dates)")
     ap.add_argument("--jobs", type=int, default=None, help="units in parallel (default coreg.jobs)")
     ap.add_argument("--force", action="store_true", help="redo units even when verified done")
@@ -813,9 +1065,9 @@ def main(argv=None) -> int:
         return detach(argv, cg, a.stage or "all")
     log = Log(None if a.dry_run else cg.logdir / f"run_{a.stage or 'all'}_{stamp()}.log")
     log(f"nisar_coreg {cg.mode} stack {cg.stack_id} (config {cg.path}, git {git_rev()})")
-    stages = [a.stage] if a.stage else ["prepare", "crop", "coreg"]
+    stages = [a.stage] if a.stage else ["prepare", "crop", "coreg", "igram"]
     for s in stages:
-        rc = {"prepare": stage_prepare, "crop": stage_crop, "coreg": stage_coreg}[s](cg, a, log)
+        rc = {"prepare": stage_prepare, "crop": stage_crop, "coreg": stage_coreg, "igram": stage_igram}[s](cg, a, log)
         if rc != EXIT_OK:
             log(f"stopped at stage {s} (exit {rc})")
             return rc

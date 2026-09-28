@@ -19,13 +19,18 @@ list of withdrawn claims that must not be re-introduced. Then `asc/nisar_workflo
 
 `nisar_timeseries.py` launches each stage in the right environment itself, so it runs from either.
 
-## The two modules
+## The case runner and the two modules
 
 ```bash
 cd asc/nisar_workflows
+python run_case.py         -c ../../case_studies/<NAME>/case.yaml   show|status|run|upload [--detach]
 python nisar_coreg.py      -c coreg_configs/<case>.yaml   show|status|progress|run [--detach]
-python nisar_timeseries.py -c ts_configs/<case>.yaml      show|status|run [--stage X] [--detach]
+python nisar_timeseries.py -c ts_configs/<case>.yaml      show|status|run [--stage X|--through X] [--detach]
 ```
+
+`run_case.py` is the front door (added 2026-09-27): one case config picks `workflow` (RSLC | cropped_RSLC | GSLC |
+cropped_GSLC) × `mode` (coregistration | interferogram), generates both module configs into `<case>/_run/`, runs them
+and uploads the products. How to run it: `asc/README.md`.
 
 `show` prints the resolved plan and every parameter without running anything — use it before any run. Documentation:
 `docs/COREG_MODULE.md`, `docs/TIMESERIES_MODULE.md`. Processing parameters live in `coreg_configs/defaults.yaml` and

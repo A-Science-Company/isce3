@@ -1,15 +1,17 @@
 # NISAR InSAR workflows
 
-A config-driven NISAR InSAR pipeline built on the ISCE3 checkout it sits inside: NISAR L1 RSLC granules on disk go in; a coregistered SLC stack, wrapped and unwrapped interferograms, GUNW ionosphere/troposphere/tide corrections and a MintPy LOS displacement time series and velocity map come out. Two modules do the work — `nisar_coreg.py`, which takes one short case config and drives the ISCE3 Track R / Track G drivers underneath, and `nisar_timeseries.py`, which takes its own case config and runs its stages directly against isce3, snaphu and MintPy. No granule is ever downloaded, nothing overwrites a finished product, and every stage records the parameters it used.
+A config-driven NISAR InSAR pipeline built on the ISCE3 checkout it sits inside: NISAR L1 RSLC granules on disk go in; a coregistered SLC stack, wrapped and unwrapped interferograms, GUNW ionosphere/troposphere/tide corrections and a MintPy LOS displacement time series and velocity map come out. For a whole case in one config and one command, start at [`../README.md`](../README.md) (`run_case.py`); this page is the reference underneath it. Two modules do the work — `nisar_coreg.py`, which takes one short case config and drives the ISCE3 Track R / Track G drivers underneath, and `nisar_timeseries.py`, which takes its own case config and runs its stages directly against isce3, snaphu and MintPy. No granule is ever downloaded, nothing overwrites a finished product, and every stage records the parameters it used.
 
 ## What is here
 
 | path | what it is |
 |---|---|
-| `nisar_coreg.py` | **Module 1.** Case config in, coregistered stack out. Stages `prepare` (DEM) → `crop` → `coreg`. Subcommands `show`, `status`, `progress`, `run`. |
+| `run_case.py` | **The case runner.** One `case_studies/<NAME>/case.yaml` in — `workflow` (RSLC / cropped_RSLC / GSLC / cropped_GSLC) × `mode` (coregistration / interferogram), a resolution and a source per correction — and it generates both module configs, runs them in order and pushes the products to GCS. Subcommands `show`, `status`, `run`, `upload`. Reference: [`../README.md`](../README.md). |
+| `nisar_coreg.py` | **Module 1.** Case config in, coregistered stack out. Stages `prepare` (DEM) → `crop` → `coreg` → `igram` (GSLC only). Subcommands `show`, `status`, `progress`, `run`. |
 | `nisar_timeseries.py` | **Module 2.** Coregistered RSLC stack in, LOS displacement time series and velocity out. Stages `geometry` → `ifg` → `unwrap` → `corrections` → `mintpy`. Subcommands `show`, `status`, `run`. |
 | `run_track_r.py`, `run_track_g.py` | The ISCE3 drivers `nisar_coreg.py` invokes, both usable standalone. Track R (`mode: RSLC`): RSLC → coregistered RIFG in radar coordinates, stages `ingest`, `dem`, `runconfig`, `insar`, `qa`. Track G (`mode: GSLC`): RSLC → L2 GSLC on a pinned, shared geogrid, plus interferogram, water mask, unwrap and a folium overlay. Both are built from `nisar_wf/`. |
 | `tools/` | `nisar_fetch.py` (ASF search + download), `rslc_subset.py` (crop), `apply_patches.py` (overlay upstream ISCE3 fixes), comparison and report builders, `archive_to_gcs.py` / `verify_archive.py`. |
+| `case_template.yaml` | The annotated starting point for a `case_studies/<NAME>/case.yaml`: every `run_case.py` key with its default and what it does. |
 | `coreg_configs/`, `ts_configs/` | Case configs for the two modules, each beside a `defaults.yaml` holding every processing parameter at its validated value — coreg: crop buffers, `rslc`/`gslc`, `run`; time series: looks, network, snaphu, corrections, MintPy and the per-stage interpreters. `configs/` holds the science configs for the *drivers*, including `_template.yaml`; the modules generate their own driver config into the stack directory, so do not hand-edit a generated one. |
 | `docs/`, `STATE.md` | `docs/README.md` is the index; `COREG_MODULE.md` and `TIMESERIES_MODULE.md` are the module references, `PIPELINE_DESIGN.md`, `COMPARISON.md`, `WF1`–`WF4` and `OPERATIONS_AND_LESSONS.md` the evidence base. `STATE.md` is the resume point: what is finished, what was decided, and the claims that were withdrawn and must not be reintroduced. |
 
@@ -28,7 +30,7 @@ conda activate insar_ts      # ifg, unwrap, corrections, mintpy
 cd /home/sharath/isce3/asc/nisar_workflows
 ```
 
-`nisar_timeseries.py` re-execs each stage in the interpreter named under `envs:` in `ts_configs/defaults.yaml` (`isce3_python` for `geometry`, `ts_python` for the rest), so it can be launched from either conda env. `nisar_coreg.py` does *not* re-exec — it spawns the driver with `sys.executable`, so launch it from `isce3_env`. Both modules' `show` and `status` need only PyYAML.
+`nisar_timeseries.py` re-execs each stage in the interpreter named under `envs:` in `ts_configs/defaults.yaml` (`isce3_python` for `geometry`, `ts_python` for the rest), so it can be launched from either conda env. `nisar_coreg.py` does *not* re-exec: it spawns the drivers and the subsetter with `envs.isce3_python` from `coreg_configs/defaults.yaml`, which is `null` by default and then means the interpreter that started it — so either set that key or launch the module from `isce3_env`. Both modules' `show` and `status` need only PyYAML.
 
 ## Running the pipeline
 
@@ -96,7 +98,7 @@ python nisar_timeseries.py -c ts_configs/nepal_nisar_ascending_pre_event.yaml ru
 
 ## nisar_coreg.py — crop and coregistration
 
-One case config in, one coregistered stack out, from NISAR L1 RSLCs that are already on disk (it never downloads an RSLC — the only thing it fetches is the DEM, in `prepare`). **RSLC mode** resamples every secondary date onto the reference date's radar grid — ISCE3 `rdr2geo → geo2rdr → coarse resample → dense offsets → rubber sheet → fine resample → crossmul` — giving coregistered SLCs, the reference geometry rasters and a 1×1 RIFG per pair. **GSLC mode** geocodes every date independently onto one pinned map grid using geometry only: pixel-aligned by construction, not registered to each other. Full detail: `docs/COREG_MODULE.md`. The module launches its subprocesses with the interpreter that started it (`sys.executable`), so it does **not** switch environments for you — activate first. `prepare` downloads a DEM from `urs.earthdata.nasa.gov` (`dem.source: NISAR`, ellipsoidal heights), so `~/.netrc` must hold Earthdata credentials the first time a case is run.
+One case config in, one coregistered stack out, from NISAR L1 RSLCs that are already on disk (it never downloads an RSLC — the only thing it fetches is the DEM, in `prepare`). With `rslc.ionosphere.enabled` it also runs ISCE3's split-spectrum solve, and each pair's product becomes a RUNW carrying `ionospherePhaseScreen` (`runw/`, gated on being finite and not identically zero). **RSLC mode** resamples every secondary date onto the reference date's radar grid — ISCE3 `rdr2geo → geo2rdr → coarse resample → dense offsets → rubber sheet → fine resample → crossmul` — giving coregistered SLCs, the reference geometry rasters and a 1×1 RIFG per pair. **GSLC mode** geocodes every date independently onto one pinned map grid using geometry only: pixel-aligned by construction, not registered to each other. Full detail: `docs/COREG_MODULE.md`. The module launches its subprocesses with `envs.isce3_python` (default `null` = the interpreter that started it), so unless that key is set it does **not** switch environments for you — activate first. `prepare` downloads a DEM from `urs.earthdata.nasa.gov` (`dem.source: NISAR`, ellipsoidal heights), so `~/.netrc` must hold Earthdata credentials the first time a case is run.
 
 ```bash
 source /home/sharath/miniforge3/etc/profile.d/conda.sh && conda activate isce3_env
@@ -109,12 +111,12 @@ python nisar_coreg.py -c <case config> {show|status|progress|run} [options]
 | `show` | Prints the resolved plan — selected dates, reference and how it was chosen, stack and crop directory names, DEM presence, and the parameters in effect: the `inputs`, `run` and `rslc` sections plus `crop_buffers` (`gslc` in GSLC mode), with the list of case-config overrides. The `dem` section is not among them — `show` prints only the resolved DEM path and whether it exists. Runs nothing, writes nothing. |
 | `status` | One line per date: role, input RSLC size, crop state, coreg state — each `done`, `running`, `FAILED` or `-`. Also whether the DEM and the coreg set-up are done, and free disk. |
 | `progress` | Detail for unfinished units: ISCE3 stage timeline from scratch-directory birth times, current stage, last progress line from the unit log, scratch size. RSLC only; in GSLC mode it falls back to `status`. |
-| `run` | Executes the stages. Default order `prepare → crop → coreg`. |
+| `run` | Executes the stages. Default order `prepare → crop → coreg → igram`. |
 
 | option | what it does | default |
 |---|---|---|
 | `-c PATH`, `--config PATH` | The case config (`coreg_configs/<case>.yaml`). Required for every subcommand. | — |
-| `--stage {prepare,crop,coreg}` | Run only this stage. Stops at the first stage that does not exit 0. | all three, in order |
+| `--stage {prepare,crop,coreg,igram}` | Run only this stage. Stops at the first stage that does not exit 0. `igram` is GSLC only and a no-op in RSLC mode. | all four, in order |
 | `--dates D [D ...]` | Units to process. `crop`: dates. RSLC `coreg`: secondaries (the reference is not a unit — passing it is a config error). GSLC `coreg`: dates. | all units of the stage |
 | `--jobs N` | Units in parallel, within one stage (thread pool). | `run.jobs` from the merged config — `2` in `coreg_configs/defaults.yaml` |
 | `--force` | Redo units whose manifest says done and clear the pair's ISCE3 scratch before re-running. Also re-runs the coreg set-up. For a `coreg` unit the module does **not** delete the stack's existing outputs, and the export step refuses to replace a file it did not just write (`… exists and is a different file; refusing to overwrite`), so re-running a finished secondary fails at export (exit 1, `checks.export`) unless you first remove that unit's `slc/<sec>.slc`, `slc/<sec>.hdr`, `ifg/RIFG_<ref>_<sec>_*.h5` and `offsets/<sec>_*`. Only `crop` overwrites its own output under `--force`. | off |
@@ -124,14 +126,14 @@ python nisar_coreg.py -c <case config> {show|status|progress|run} [options]
 
 ### Case config
 
-Only these nine keys are case keys. Any other top-level key must name a section of `coreg_configs/defaults.yaml` (`inputs`, `dem`, `crop_buffers`, `rslc`, `gslc`, `run`) and is treated as an override; anything else is rejected with exit 2.
+Only these nine keys are case keys. Any other top-level key must name a section of `coreg_configs/defaults.yaml` (`envs`, `inputs`, `dem`, `crop_buffers`, `rslc`, `gslc`, `run`) and is treated as an override; anything else is rejected with exit 2.
 
 | key | meaning | `null` / absent means |
 |---|---|---|
 | `case` | Case name. Goes into the DEM filename (`aux/dem/dem_<case>.tif`) and the tmux session name. | required — error |
 | `workdir` | Holds `L1_RSLC/` (inputs), `aux/dem/`, and the `crop/` and `coreg/` outputs. Must exist. | required — error |
 | `mode` | `RSLC` or `GSLC`. | required — error |
-| `crop` | RSLC: cut every RSLC to the AOI first (`tools/rslc_subset.py`, zero Doppler). GSLC: clip the output geogrid to the AOI bounding box. | `false` — full tile; the stack name says `fulltile` |
+| `crop` | Cut every RSLC to the AOI first (`tools/rslc_subset.py`, zero Doppler) before coregistering or geocoding it. In GSLC mode it *also* clips the output geogrid to the AOI bounding box, which is what the validated WF4 pass did. | `false` — full tile; the stack name says `fulltile` |
 | `aoi_kml` | KML whose coordinates give the AOI. Must exist; its stem names the crop directory and appears in the stack name. | no AOI. With `crop: true` this is an error |
 | `reference_date` | RSLC only. Must be one of the selected dates. | the middle of the selected dates; for an even count, the earlier of the two middle ones |
 | `start_date` | Lower bound (inclusive) on the RSLCs already in `L1_RSLC/`. `YYYYMMDD` or `YYYY-MM-DD`. | earliest on disk |
@@ -151,9 +153,10 @@ Crop buffers are the exception only for the crop directory: when `crop_buffers` 
 | stage | when | unit | produces |
 |---|---|---|---|
 | `prepare` | once per case; skipped if the DEM exists | — | `aux/dem/dem_<case>.tif` (via `run_track_r.py --only ingest dem`) |
-| `crop` | RSLC with `crop: true` only | date | `crop/<aoi>/<date>.h5`, plus `status/<date>.json`, `params.json`, `logs/` |
+| `crop` | `crop: true`, either mode | date | `crop/<aoi>/<date>.h5`, plus `status/<date>.json`, `params.json`, `logs/` |
 | `coreg` set-up | once, again when dates are added | — | the generated, validated driver config `coreg/<stack>/track_r.yaml` (`track_g.yaml` for GSLC), ISCE3 ingest + DEM check + runconfigs, `status/_setup.json` |
 | `coreg` | always | RSLC: one secondary. GSLC: one date | the stack tree below. GSLC adds a final `gridgate` after all dates pass |
+| `igram` | GSLC with `gslc.interferogram.enabled: true` | one pair (one driver call for all of them) | `isce3/pairs/<ref>_<sec>/trackG/ifg_<F>_<P>_<ly>x<lx>.{igram,coh,nlooks,amp}.tif`, `status/igram_<d1>_<d2>.json`. RSLC interferograms come from `nisar_timeseries.py` instead |
 
 ```
 <workdir>/coreg/RSLC_ref20260726_AHH_glof_bigger_aoi/
@@ -230,7 +233,7 @@ python nisar_timeseries.py -c ts_configs/<case>.yaml {show|status|run} [options]
 |---|---|
 | `show` | Prints the resolved plan and every parameter in effect; runs nothing, writes nothing. Dates, pairs with temporal baselines, AOI + margin, looks, which GUNWs were matched and whether they connect all dates, reference point, output directory, and whether the coregistration is ready. Run this first, always. |
 | `status` | One line for the three whole-run stages (geometry, corrections, mintpy), then one line per pair with its ifg and unwrap state: `done`, `running`, `FAILED` or `-`, read from the manifests in `status/`. |
-| `run` | Executes the stages. Default is all five in order; stops at the first stage that returns non-zero. |
+| `run` | Executes the stages. Default is all five in order; stops at the first stage that returns non-zero. `--through <stage>` runs from the first stage up to and including that one — `--through ifg` is the "interferogram only" run, and it needs no GUNWs because the corrections gate applies only when the corrections stage is selected. |
 | `_stage` | Internal. The parent re-invokes itself with this to run one stage inside the stage's own interpreter. Do not call it by hand. |
 
 | option | argument | default | meaning |
@@ -577,7 +580,7 @@ aoi_kml: /home/sharath/nisar_downloader/glof_bigger_aoi.kml
 reference_date: null      # null -> middle date (20260726 for this case)
 ```
 
-The module calls `tools/rslc_subset.py` itself with `--buffer-az-lines` / `--buffer-range-m` / `--buffer` from `coreg_configs/defaults.yaml:crop_buffers` (1000 lines, 12500 m, 500 px) and leaves the alignment flags at tool defaults — so module crops get the 64-multiple side-band snap that the v2 crops did not. It writes `crop/<aoi>/<date>.h5`, a `params.json` per crop directory and per stack, and refuses a later run whose parameters differ (exit 2). Looks are not a setting: every RIFG is 1×1. **The module stops at RIFG** — unwrap and ionosphere are `nisar_timeseries.py`. Budget: crop ~2.3 min and **1.80 GB** per date (smoke test: 0714 in 157 s); the v2 chain used **34 GB** of scratch including the ionosphere side-band sub-run and stayed well within **31 GB** of RAM; the module expects ≈80 min per pair, six secondaries 2-at-a-time ≈5–6 h, ≈32 GB scratch per running pair and ≈110 GB peak with 2 pairs (154 GB free on 2026-09-15). Module figures are expectations carried over from crop v2 (COREG_MODULE.md); the actual 7-date wall time is not recorded.
+The module calls `tools/rslc_subset.py` itself with `--buffer-az-lines` / `--buffer-range-m` / `--buffer` from `coreg_configs/defaults.yaml:crop_buffers` (1000 lines, 12500 m, 500 px) and with `--align-az-looks` / `--align-rg-looks` from the same section (9 and 8, the tool's own defaults, so the window is unchanged) — module crops also get the 64-multiple side-band snap that the v2 crops did not. Those two keys exist so that a case using different interferogram looks snaps its crop to the same lattice; `run_case.py` sets them from the case's `looks:` for exactly that reason, and a non-default value is added to the crop directory name. It writes `crop/<aoi>/<date>.h5`, a `params.json` per crop directory and per stack, and refuses a later run whose parameters differ (exit 2). Looks are a setting but default to 1×1 (`rslc.interferogram.looks`), which is what the time-series module's RIFG gate compares against; a different value writes a differently named product (`ifg/RIFG_<ref>_<sec>_<F>_<P>_<az>x<rg>.h5`) and switches that gate off. **The module stops at RIFG** — unwrap and ionosphere are `nisar_timeseries.py`. Budget: crop ~2.3 min and **1.80 GB** per date (smoke test: 0714 in 157 s); the v2 chain used **34 GB** of scratch including the ionosphere side-band sub-run and stayed well within **31 GB** of RAM; the module expects ≈80 min per pair, six secondaries 2-at-a-time ≈5–6 h, ≈32 GB scratch per running pair and ≈110 GB peak with 2 pairs (154 GB free on 2026-09-15). Module figures are expectations carried over from crop v2 (COREG_MODULE.md); the actual 7-date wall time is not recorded.
 
 #### Run it the historical way — subsetter + driver
 

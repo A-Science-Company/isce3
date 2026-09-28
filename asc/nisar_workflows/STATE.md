@@ -140,6 +140,84 @@ NISAR RSLC acquisitions over the GLOF AOI (ASF search 2026-09-15; PR = provision
 Pre-event reference pairs: ascending 0726→0819 (24 d); D48 0723→0816 (24 d). Post-event: ascending 0831→0912; D48 0828→0909.
 Choice of geometry pending with the user.
 
+## Case runner (2026-09-27)
+
+`run_case.py` is the front door: one `case_studies/<NAME>/case.yaml` selects `workflow` (RSLC | cropped_RSLC | GSLC |
+cropped_GSLC) × `mode` (coregistration | interferogram), and it generates the two module configs into
+`<case>/_run/`, runs the modules as subprocesses, and pushes the mode's products to GCS. Documentation: `../README.md`
+(how to run it) and `README.md` (the reference underneath). It plans by importing `Coreg` and `Ts` and executes by
+subprocess, because the drivers have import-time side effects and the time-series module re-execs per stage.
+
+What changed in the modules to make the 4 × 2 matrix expressible — all of it default-preserving; the validated Nepal
+stack re-runs with every unit skipped and no gate refused:
+
+- `rslc.interferogram.looks` (default 1×1) replaces the hardcoded 1×1 RIFG; the looks are in the product name, and
+  the time-series RIFG gate switches itself off at anything other than 1×1 because it multilooks the RIFG itself.
+- `crop_buffers.align_az_looks` / `align_rg_looks` (default 9/8 = the subsetter's own defaults) are now passed to
+  `tools/rslc_subset.py` instead of being left implicit. `run_case.py` sets them from the case's interferogram looks,
+  which closes the one silent failure the audit found: a case that changed looks got a crop lattice that no longer
+  matched, with nothing to catch it. A non-default value appears in the crop directory name.
+- `gslc.interferogram` (off by default, 8×8 on the 5 m grid) plus a new `igram` stage that calls Track G step 6 —
+  previously unreachable from any config.
+- GSLC with `crop: true` now geocodes the *cropped* granules, as the validated WF4 pass did, instead of full-tile
+  granules with a clipped output grid.
+- `envs.isce3_python` for the child processes; `nisar_timeseries.py --through <stage>`; the GUNW connectivity gate
+  applies only when the run reaches the corrections stage, so an interferogram-only case needs no `L2_GUNW/`.
+- A dry run now plans past missing prerequisites (DEM, crops, GSLCs) instead of stopping at the first one, and says
+  what would have made them.
+
+Not yet exercised for real: the GSLC legs through this module (both `coregistration` and `igram`), and `run_case.py`
+driving a case from empty to product. Everything is covered by `show`, `status`, `upload --dry-run` and
+`run --dry-run` over all eight cells, which validate the generated driver configs with the drivers' own loader.
+
+## Custom ionosphere and the resolution preset (2026-09-27, decided by the user)
+
+The user's call: **an uncorrected L-band interferogram is not a measurement, so a custom ionosphere is required** —
+the GUNW's screen varies on tens of kilometres whatever grid it is stored on (autocorrelation >0.95 at 20 km,
+1/e at ~90 km; its dispersive filter is sigma 245 m range x 2.6 km azimuth), and a case may have no GUNW
+at all. Also: presets for resolution, with a custom mode that takes both look counts, and no geocoding implied (RSLC
+products stay in radar coordinates with their geometry layers).
+
+What was built:
+
+- `corrections:` names a source per layer — `ionosphere: gunw | split_spectrum | none`, troposphere and tides
+  `gunw | none`. `true`/`false` remain shorthand for all-gunw/all-none, and a params.json written when they were
+  booleans is migrated rather than refused. A troposphere straight from a weather model is refused with the reason:
+  the GUNW's troposphere already *is* one (ECMWF HRES via RAiDER).
+- `rslc.unwrap` and `rslc.ionosphere` in the coreg config. The product type is derived (RUNW when either is on),
+  never set by hand, because ISCE3 skips the ionosphere in silence unless the product is a RUNW. `unwrap.nlooks`
+  must be set — ISCE3 derives it from the 1x1 crossmul grid otherwise and snaphu aborts at 0.619.
+- The screens are consumed by `nisar_timeseries.py` with a slice, not an interpolation: ISCE3 unwraps the same crop
+  at the same looks, and the time-series window is a whole number of looks into it. Verified on the real geometry:
+  crop (12303, 22464) -> screen (1367, 2808) -> slice [59:1308, 560:2245] -> (1249, 1685) = the interferogram grid.
+- Because coregistration is a star, each screen is already that date's ionosphere relative to the reference: a
+  5-date series needs 4 solves, not one per interferogram, and the existing least-squares pair->date code handles it
+  unchanged.
+- `resolution_m` resolves to looks from the granule's own spacing and the AOI's incidence (40 m -> 9x8, reproducing
+  the validated setting). Only the resolved integers are recorded or named. Giving both `resolution_m` and `looks`
+  is refused unless they agree.
+
+Measured / verified, and what is not:
+
+- ISCE3's own `InsarRunConfig` **accepts** the generated runconfig and auto-fills the side band to `{A: [HH], B: [HH]}`;
+  snaphu nlooks 44.57, unwrap looks 8 range / 9 azimuth, product `RUNW_<ref>_<sec>_A_HH_1x1_unw9x8.h5`.
+- The screen slice is unit-tested against the real crop geometry, including the negation and a wrong-shape refusal.
+- **The solve itself is not new**: WF1 ran it on the full tile (screen 5911 x 6780, 27 min for solve+filter+write)
+  and WF3 on a crop (RUNW_20260714_20260726_A_HH_1x1_unw9x8.h5, 73.4 MB, 1367 x 2805), and the new defaults are that
+  run's own config values (configs/nepal_glof_aoi_v2.yaml:524, :692, :726-727). Those products were archived to GCS
+  and deleted locally, which is why nothing matches *RUNW*.h5 on this disk.
+- **What has never run is the module path**: nisar_coreg.py producing the RUNW+screen from a case config, and
+  nisar_timeseries.py consuming it. Cost expected ~1.5 h per pair on a crop (WF3 measured 1 h 29 m for RIFG + 9x8
+  unwrap + ionosphere) against ~80 min for the plain RIFG; disk +16.9 B per reference pixel.
+- **The screen's orientation is settled by an existing measurement.** A star product whose reference is the later
+  date is negated so that every row of the design matrix means the same thing as a GUNW row. The crop-v2 comparison
+  found our ISCE3 screen and the GUNW's to have the *same sign* on 20260714 x 20260726, where the ISCE3 reference is
+  the earlier date (docs/TIMESERIES_MODULE.md validation table), which is exactly this rule. Note the fact-gathering
+  for this work concluded the opposite flip direction; the measurement wins. The stage re-checks it per pair at
+  runtime wherever a GUNW covers the same dates and logs a negative correlation loudly.
+- A crop's screen level is one frequency-B cycle (-5.35 TECU) from the full tile's while the shape agrees to
+  r = 0.99945; the level is constant and cancels once the series is referenced.
+
 ## Open items (ask the user before running anything)
 
 1. Re-geocode the GSLC secondary with the rubber-sheet field injected via ISCE3 gslc.py az_time_correction / srange_correction (processing change; ask).

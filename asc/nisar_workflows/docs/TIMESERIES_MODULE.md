@@ -13,8 +13,13 @@ C=ts_configs/nepal_nisar_ascending_pre_event.yaml
 python nisar_timeseries.py -c $C show            # dates, pairs, GUNW coverage, whether the coreg is ready, parameters
 python nisar_timeseries.py -c $C run --dry-run
 python nisar_timeseries.py -c $C run --detach    # all stages, in tmux
+python nisar_timeseries.py -c $C run --through ifg   # stop after the interferograms
 python nisar_timeseries.py -c $C status
 ```
+
+`--stage X` runs one stage; `--through X` runs from the first stage up to and including X. The GUNW connectivity
+check only applies to a run that reaches the `corrections` stage, so `--through ifg` works on a case with no
+`L2_GUNW/` at all. This is the interferogram-only path the case runner uses (`../../README.md`).
 
 The command works from any conda environment: each stage re-launches itself in the environment named in
 `ts_configs/defaults.yaml` (`isce3_env` for geometry, `insar_ts` for the rest).
@@ -40,7 +45,7 @@ locked in `params.json`; a changed value needs a new `name` or a `tag`.
 | geometry | isce3 | Radar window = AOI bounding box + 2 km. Multilooked lat/lon/height, incidence and azimuth angles, slant range. Perpendicular baselines. Per-date flattening range offsets recomputed with isce3 `Geo2Rdr`, exactly as ISCE3 insar's geo2rdr step (the coreg module prunes its copy). | `geometry/geometryRadar.h5`, `meta.json`, `flatten/<date>_range_offset.f32` |
 | ifg | ts | Per pair: s1·conj(s2)·exp(−i·4π/λ·Δr·(off2−off1)), summed over 9×8 looks, plus coherence \|Σ s1 s2*\| / √(Σ\|s1\|² Σ\|s2\|²). Pairs that include the stack reference are checked against ISCE3's RIFG. | `pairs/<d1>_<d2>/ifg.int`, `coh.cor` |
 | unwrap | ts | snaphu, 3×3 tiles, 150-pixel overlap, nlooks = looks × 0.619 (ISCE3's effective-looks formula). Then a census of whole-cycle closure errors over every triplet. | `unw.unw`, `conncomp.cc`, `qa/unwrap_closure.json` |
-| corrections | ts | For each GUNW whose two dates are in the series: ionosphere (2-D, 80 m) and wet + hydrostatic troposphere and solid-earth tides (3-D cubes sampled at each pixel's height). Pair screens are converted to per-date screens by least squares (exact for a chain). **A layer missing from any GUNW in the network is dropped for every pair in it** and recorded as `dropped` in the stage manifest — a series inverted from screens present on some edges and absent on others is not a consistent field, and the dates the missing edge touches would step by whatever the absent screen was. The cost is real: the UR product for 31 Aug – 12 Sep carries no troposphere cubes, so 19–31 Aug loses a troposphere correction it does have. | `corrections/per_date_phase.h5`, `qa/corrections.json` |
+| corrections | ts | Each layer names its source (`corrections.{ionosphere,troposphere,solid_earth_tides}`; the old `true`/`false` still mean `gunw`/`none`). **`ionosphere: split_spectrum`** takes our own screens instead: the RUNWs `nisar_coreg.py` writes with `rslc.ionosphere.enabled`, one per (stack reference, date). Those come from the coregistration star, so they are already per-date, and they are *sliced* onto the time-series grid rather than interpolated — same crop, same looks, window offsets a whole number of looks. Where a GUNW covers the same pair, the two independent screens are correlated against each other and the result recorded in `qa/corrections.json`; a negative correlation means an orientation is wrong and is logged as such. **`gunw`**: for each GUNW whose two dates are in the series: ionosphere (2-D, 80 m) and wet + hydrostatic troposphere and solid-earth tides (3-D cubes sampled at each pixel's height). Pair screens are converted to per-date screens by least squares (exact for a chain). **A layer missing from any GUNW in the network is dropped for every pair in it** and recorded as `dropped` in the stage manifest — a series inverted from screens present on some edges and absent on others is not a consistent field, and the dates the missing edge touches would step by whatever the absent screen was. The cost is real: the UR product for 31 Aug – 12 Sep carries no troposphere cubes, so 19–31 Aug loses a troposphere correction it does have. | `corrections/per_date_phase.h5`, `qa/corrections.json` |
 | mintpy | ts | ifgramStack.h5 → reference point → [unwrap-error correction] → inversion → subtract SET, ionosphere, troposphere → [DEM error] → velocity (corrected and uncorrected) → temporal-coherence mask → geocode → GeoTIFFs. Skipped with a message for fewer than 2 pairs. | `mintpy/`, `export/*.tif`, `qa/mintpy.json` |
 
 Conventions:

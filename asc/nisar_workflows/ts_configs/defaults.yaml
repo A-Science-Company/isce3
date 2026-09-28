@@ -27,12 +27,17 @@ unwrap:                                # snaphu (snaphu-py 0.4.1)
   min_conncomp_frac: 0.01
   nlooks: null                         # effective looks; null = azimuth x range looks x (spacing/resolution) from the RSLC
 
-corrections:                           # from the NISAR GUNW of each date pair, sampled onto our grid
+corrections:                           # each layer names where it comes from. true = gunw, false = none.
   gunw_dir: L2_GUNW                    # relative to the case workdir
   tier_preference: [PR, UR]
-  ionosphere: true                     # unwrappedInterferogram/<pol>/ionospherePhaseScreen (80 m grid)
-  troposphere: true                    # metadata/radarGrid wet + hydrostatic TroposphericPhaseScreen (3-D cube)
-  solid_earth_tides: true              # metadata/radarGrid slantRangeSolidEarthTidesPhase (3-D cube)
+  ionosphere: gunw                     # gunw | split_spectrum | none
+                                       #   gunw: unwrappedInterferogram/<pol>/ionospherePhaseScreen, stored on the 80 m
+                                       #     grid but filtered to a ~10 km screen by the producer
+                                       #   split_spectrum: our own, from the RUNWs nisar_coreg.py writes when
+                                       #     rslc.ionosphere.enabled is true. Needs no GUNW; costs ~1.5 h per pair
+  troposphere: gunw                    # gunw | none. metadata/radarGrid wet + hydrostatic screens (500 m, 20 heights),
+                                       #   ECMWF HRES via RAiDER. UR-tier GUNWs do not carry them
+  solid_earth_tides: gunw              # gunw | none. metadata/radarGrid slantRangeSolidEarthTidesPhase (500 m cube)
 
 mintpy:
   reference_min_coherence: 0.85        # automatic reference point: highest average coherence above this

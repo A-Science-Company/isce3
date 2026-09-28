@@ -191,6 +191,13 @@ class Ts:
             errs.append(f"the interferogram network does not connect all dates: {self.pairs}")
         if errs:
             raise ConfigErr("time-series config errors:\n  " + "\n  ".join(errs))
+        for k, allowed in self.CORR_SOURCES.items():
+            if self.source(k) not in allowed:
+                errs.append(f"corrections.{k}: {self.eff['corrections'][k]!r} is not one of {list(allowed)}"
+                            + ("; a troposphere from a weather model directly (RAiDER/ERA5) is not implemented - the "
+                               "GUNW's own troposphere is ECMWF HRES via RAiDER" if k == "troposphere" else ""))
+        if errs:
+            raise ConfigErr("time-series config errors:\n  " + "\n  ".join(errs))
         self.az_looks, self.rg_looks = int(eff["looks"]["azimuth"]), int(eff["looks"]["range"])
         self.out = cg.workdir / "timeseries" / cg.stack_id / (self.name + (f"_{self.tag}" if self.tag else ""))
         self.logdir = self.out / "logs"
@@ -200,7 +207,8 @@ class Ts:
         e = self.eff
         return {"stack": self.cg.stack_id, "reference": self.cg.reference, "dates": self.dates, "pairs": [f"{a}_{b}" for a, b in self.pairs],
                 "aoi_kml_sha1": sha1_file(self.aoi_kml), "aoi": e["aoi"], "looks": e["looks"], "unwrap": e["unwrap"],
-                "corrections": e["corrections"], "flatten_sign": FLATTEN_SIGN}
+                "corrections": {**e["corrections"], **{k: self.source(k) for k in self.CORR_SOURCES}},
+                "flatten_sign": FLATTEN_SIGN}
         # The mintpy section is deliberately NOT locked: that stage is a re-derivation from the locked pair products, it is
         # regenerated as a whole (the previous run is moved to mintpy_replaced_<stamp>), and the settings it used are recorded
         # in its own manifest, in mintpy/mintpy.cfg and in qa/mintpy.json.
@@ -227,6 +235,8 @@ class Ts:
         ref = self.cg.reference
         if ref not in p:
             return None, False
+        if self.cg.ifg_looks != (1, 1):
+            return None, False      # rifg_ml multilooks the RIFG itself; the gate only means anything at 1x1
         sec = p[1] if p[0] == ref else p[0]
         return self.cg.stack_dir / "ifg" / f"RIFG_{ref}_{sec}_{self.cg.pair_tag()}.h5", p[0] != ref   # (path, conjugate?)
 
@@ -245,9 +255,42 @@ class Ts:
                     found[(d1, d2)] = (tier, f)
         return {k: v[1] for k, v in sorted(found.items())}
 
+    CORR_SOURCES = {"ionosphere": ("gunw", "split_spectrum", "none"),
+                    "troposphere": ("gunw", "none"), "solid_earth_tides": ("gunw", "none")}
+
+    def source(self, kind: str) -> str:
+        """Where one correction comes from. true/false are the legacy spelling of gunw/none."""
+        v = self.eff["corrections"][kind]
+        if isinstance(v, bool):
+            return "gunw" if v else "none"
+        return str(v)
+
+    def kinds_from(self, src: str) -> list[str]:
+        return [k for k in ("ionosphere", "troposphere", "solid_earth_tides") if self.source(k) == src]
+
+    def runw_pairs(self) -> dict:
+        """(d1, d2) -> (RUNW path, negate) for the star products nisar_coreg.py writes when rslc.ionosphere is on.
+
+        Orientation: a NISAR GUNW always has its reference as the earlier date, so a screen enters the design matrix
+        with the product's reference as d1. A star product's reference is the stack reference, which is the later date
+        for half the pairs, so those screens are negated to mean the same thing. This is the measured convention, not
+        an assumption: the crop-v2 comparison found our ISCE3 screen and the GUNW's to have the SAME sign on
+        20260714 x 20260726, where the ISCE3 reference is the earlier date (docs/TIMESERIES_MODULE.md, validation).
+        stage_corrections re-checks it per pair at runtime wherever a GUNW covers the same dates.
+        """
+        found = {}
+        for f in sorted((self.cg.stack_dir / "runw").glob("RUNW_*.h5")):
+            m = re.match(r"RUNW_(\d{8})_(\d{8})_", f.name)
+            if not m:
+                continue
+            ref, sec = m.groups()
+            if ref in self.dates and sec in self.dates:
+                key = (min(ref, sec), max(ref, sec))
+                found[key] = (f, key[0] != ref)
+        return dict(sorted(found.items()))
+
     def any_correction(self):
-        c = self.eff["corrections"]
-        return c["ionosphere"] or c["troposphere"] or c["solid_earth_tides"]
+        return bool(self.kinds_from("gunw") or self.kinds_from("split_spectrum"))
 
 
 def params_gate(ts: Ts, log: Log, dry_run: bool) -> bool:
@@ -258,6 +301,13 @@ def params_gate(ts: Ts, log: Log, dry_run: bool) -> bool:
         if not dry_run:
             write_json(pfile, cur)
         return True
+    if old is not None and isinstance(old.get("corrections"), dict):
+        # migration: the three layers used to be booleans, and true/false mean exactly gunw/none. Rewriting them here
+        # keeps a product made before the sources existed from being refused over a spelling change.
+        for k, allowed in Ts.CORR_SOURCES.items():
+            v = old["corrections"].get(k)
+            if isinstance(v, bool):
+                old["corrections"][k] = "gunw" if v else "none"
     if old == cur:
         return True
     # Keys the current schema no longer locks (e.g. settings moved to a re-derived stage) are not a mismatch: compare on the
@@ -750,14 +800,50 @@ def sample_gunw(path: Path, lat, lon, hgt, pol: str, freq: str, want: dict) -> d
     return out
 
 
+def sample_runw(path: Path, meta: dict, pol: str, freq: str, negate: bool):
+    """Our own ionosphere screen, sliced onto the time-series grid.
+
+    No interpolation: ISCE3 unwraps the same crop at the same looks, and the window offsets are whole multiples of
+    those looks, so the slice lands on our cells. That only holds for a screen made from THIS crop, and a screen from
+    a slightly different crop would slice to the right shape while meaning the wrong ground -- so the grid is checked,
+    not the shape: the screen's own multilooked size, and the slant range it reports for our first column.
+    """
+    import h5py
+    import numpy as np
+    az, rg = meta["looks"]
+    R0, R1, C0, C1 = meta["window_full"]
+    bad = [n for n, v in (("R0", R0), ("R1", R1)) if v % az] + [n for n, v in (("C0", C0), ("C1", C1)) if v % rg]
+    if bad:
+        raise ConfigErr(f"window {meta['window_full']} is not a whole number of {az}x{rg} looks in {bad}")
+    grp = f"science/LSAR/RUNW/swaths/frequency{freq}/interferogram"
+    ds = f"{grp}/{pol}/ionospherePhaseScreen"
+    want = (meta["full_shape"][0] // az, meta["full_shape"][1] // rg)
+    with h5py.File(path, "r") as f:
+        if ds not in f:
+            raise ConfigErr(f"{path.name} has no {ds}; was rslc.ionosphere.enabled true for that run?")
+        full = tuple(f[ds].shape)
+        if full != want:
+            raise ConfigErr(f"{path.name}: the screen is {full} but this crop at {az}x{rg} looks is {want}. It was "
+                            f"made from a different crop or different unwrap looks; a screen from another window can "
+                            f"slice to the right shape and still be the wrong ground")
+        if f"{grp}/slantRange" in f:
+            got = float(f[f"{grp}/slantRange"][C0 // rg])
+            exp = float(meta["starting_range_ml"])
+            if abs(got - exp) > 0.5:
+                raise ConfigErr(f"{path.name}: the screen's first sampled column is at {got:.3f} m slant range, this "
+                                f"grid's is {exp:.3f} m ({got - exp:+.3f} m). Different radar window; refusing to mix")
+        s = f[ds][R0 // az:R1 // az, C0 // rg:C1 // rg].astype(np.float32)
+    return -s if negate else s
+
+
 def stage_corrections(ts: Ts, a, log: Log) -> int:
     import h5py
     import numpy as np
     man = ts.manifest("corrections")
-    c = ts.eff["corrections"]
-    kinds = [k for k in ("ionosphere", "troposphere", "solid_earth_tides") if c[k]]
-    if not kinds:
-        log("corrections: all disabled; skip")
+    kinds = ts.kinds_from("gunw")
+    ss_kinds = ts.kinds_from("split_spectrum")
+    if not kinds and not ss_kinds:
+        log("corrections: every layer is source none; skip")
         return EXIT_OK
     if unit_done(man) and not a.force:
         log("corrections: done, skip")
@@ -766,10 +852,19 @@ def stage_corrections(ts: Ts, a, log: Log) -> int:
     if meta is None:
         log("corrections: geometry stage not done")
         return EXIT_PREREQ
-    gp = ts.gunw_pairs()
-    if not connected(ts.dates, list(gp)):
+    gp = ts.gunw_pairs() if kinds else {}
+    if kinds and not connected(ts.dates, list(gp)):
         log(f"corrections: GUNW pairs {sorted(gp)} do not connect the dates {ts.dates}")
         return EXIT_PREREQ
+    rp = ts.runw_pairs() if ss_kinds else {}
+    if ss_kinds:
+        if not rp:
+            log(f"corrections: ionosphere source is split_spectrum but {ts.cg.stack_dir / 'runw'} holds no RUNW for "
+                f"these dates; run nisar_coreg.py with rslc.ionosphere.enabled: true first")
+            return EXIT_PREREQ
+        if not connected(ts.dates, list(rp)):
+            log(f"corrections: our RUNW pairs {sorted(rp)} do not connect the dates {ts.dates}")
+            return EXIT_PREREQ
     RG = "science/LSAR/GUNW/metadata/radarGrid"
     NEEDS = {"troposphere": [f"{RG}/wetTroposphericPhaseScreen", f"{RG}/hydrostaticTroposphericPhaseScreen"],
              "solid_earth_tides": [f"{RG}/slantRangeSolidEarthTidesPhase"],
@@ -783,7 +878,7 @@ def stage_corrections(ts: Ts, a, log: Log) -> int:
     for kind, where in dropped.items():
         kinds.remove(kind)
         log(f"corrections: {kind} NOT available in {', '.join(where)}; that correction is skipped for this run")
-    if not kinds:
+    if not kinds and not ss_kinds:
         log("corrections: none of the requested layers are available in every GUNW of the network")
         write_json(man, {"stage": "corrections", "status": "ok", "finished": now(), "kinds": [], "dropped": dropped,
                          "gunw_pairs": {f"{a}_{b}": str(p) for (a, b), p in gp.items()}, "outputs": {}, "code": {"git": git_rev()}})
@@ -792,8 +887,10 @@ def stage_corrections(ts: Ts, a, log: Log) -> int:
     write_json(man, {"stage": "corrections", "status": "running", "started": now()})
     with h5py.File(ts.out / "geometry" / "geometryRadar.h5", "r") as f:
         lat, lon, hgt = f["latitude"][()].astype(np.float64), f["longitude"][()].astype(np.float64), f["height"][()].astype(np.float64)
-    screens, qa = {k: [] for k in kinds}, {}
+    screens, qa, nets = {k: [] for k in kinds + ss_kinds}, {}, {}
     pairs = list(gp)
+    for k in kinds:
+        nets[k] = pairs
     for (d1, d2), fpath in gp.items():
         t1 = time.time()
         s = sample_gunw(fpath, lat, lon, hgt, ts.cg.polarization, ts.cg.frequency, {k: True for k in kinds})
@@ -804,27 +901,63 @@ def stage_corrections(ts: Ts, a, log: Log) -> int:
                             "bperp_centre_gunw_m": s["bperp_centre"], "bperp_centre_ours_m": ours,
                             **{f"{k}_std_rad": float(np.nanstd(s[k])) for k in kinds}}
         log(f"corrections: sampled {fpath.name} ({time.time() - t1:.0f} s); B_perp GUNW {s['bperp_centre']:+.1f} m vs ours {ours:+.1f} m")
-    # pairs -> dates (first date = 0) by least squares; exact for a chain
-    idx = {d: k for k, d in enumerate(ts.dates)}
-    A = np.zeros((len(pairs), len(ts.dates)))
-    for r, (d1, d2) in enumerate(pairs):
-        A[r, idx[d1]], A[r, idx[d2]] = -1, 1
-    Ainv = np.linalg.pinv(A[:, 1:])
+    # our own split-spectrum screens. Their network is the coregistration star, not the interferogram network: one
+    # screen per (stack reference, date), which already IS the per-date ionosphere. It goes through the same least
+    # squares anyway, so one code path covers both networks and the datum stays first-date-zero.
+    for k in ss_kinds:
+        nets[k] = list(rp)
+    for (d1, d2), (fpath, negate) in rp.items():
+        t1 = time.time()
+        sc = sample_runw(fpath, meta, ts.cg.polarization, ts.cg.frequency, negate)
+        for k in ss_kinds:
+            screens[k].append(sc)
+        q = {"runw": fpath.name, "negated": negate, "seconds": round(time.time() - t1, 1),
+             "ionosphere_std_rad": float(np.nanstd(sc))}
+        # sign and shape check against the GUNW screen of the same pair, when there is one. The two solve the
+        # ionosphere independently, so a negative correlation means our orientation is wrong, not that one is noisy.
+        gf = ts.gunw_pairs().get((d1, d2))
+        if gf is not None:
+            try:
+                g = sample_gunw(gf, lat, lon, hgt, ts.cg.polarization, ts.cg.frequency, {"ionosphere": True})["ionosphere"]
+                m = np.isfinite(g) & np.isfinite(sc)
+                if m.sum() > 1000:
+                    r = float(np.corrcoef(g[m].ravel(), sc[m].ravel())[0, 1])
+                    q |= {"vs_gunw": {"file": gf.name, "correlation": r, "gunw_std_rad": float(np.nanstd(g)),
+                                      "mean_difference_rad": float(np.nanmean(sc[m] - g[m]))}}
+                    log(f"corrections: {d1}_{d2} our screen vs the GUNW's: r = {r:+.3f}"
+                        + ("" if r > 0 else "   <-- NEGATIVE: the orientation of one of the two is wrong"))
+            except Exception as e:  # noqa: BLE001
+                q["vs_gunw"] = f"not compared: {e}"
+        qa[f"{d1}_{d2}"] = {**qa.get(f"{d1}_{d2}", {}), **q}
+        log(f"corrections: read {fpath.name} ({time.time() - t1:.0f} s, negated={negate})")
+
+    def solve(pair_list, rows):
+        """pairs -> per-date (first date = 0) by least squares; exact for a chain, and for the star."""
+        idx = {d: k for k, d in enumerate(ts.dates)}
+        A = np.zeros((len(pair_list), len(ts.dates)))
+        for r, (d1, d2) in enumerate(pair_list):
+            A[r, idx[d1]], A[r, idx[d2]] = -1, 1
+        S = np.stack(rows).reshape(len(pair_list), -1).astype(np.float64)
+        per = np.zeros((len(ts.dates),) + lat.shape, np.float32)
+        per[1:] = (np.linalg.pinv(A[:, 1:]) @ S).reshape((len(ts.dates) - 1,) + lat.shape)
+        return per
+
     cdir = ts.out / "corrections"
     cdir.mkdir(parents=True, exist_ok=True)
     out = cdir / "per_date_phase.h5"
     with h5py.File(str(out) + ".part", "w") as f:
         f.attrs.update({"dates": json.dumps(ts.dates), "gunw_pairs": json.dumps({f"{a}_{b}": p.name for (a, b), p in gp.items()}),
+                        "runw_pairs": json.dumps({f"{a}_{b}": v[0].name for (a, b), v in rp.items()}),
+                        "sources": json.dumps({k: ts.source(k) for k in ts.CORR_SOURCES}),
                         "units": "radians, interferometric convention (subtract), first date = 0"})
-        for k in kinds:
-            S = np.stack(screens[k]).reshape(len(pairs), -1).astype(np.float64)
-            per = np.zeros((len(ts.dates),) + lat.shape, np.float32)
-            per[1:] = (Ainv @ S).reshape((len(ts.dates) - 1,) + lat.shape)
-            f.create_dataset(k, data=per, chunks=True, compression="lzf")
+        for k in kinds + ss_kinds:
+            f.create_dataset(k, data=solve(nets[k], screens[k]), chunks=True, compression="lzf")
     os.replace(str(out) + ".part", out)
     write_json(ts.out / "qa" / "corrections.json", {"generated": now(), "pairs": qa})
     write_json(man, {"stage": "corrections", "status": "ok", "finished": now(), "duration_s": round(time.time() - t0, 1),
-                     "kinds": kinds, "dropped": dropped, "gunw_pairs": {f"{a}_{b}": str(p) for (a, b), p in gp.items()},
+                     "kinds": kinds + ss_kinds, "dropped": dropped, "sources": {k: ts.source(k) for k in ts.CORR_SOURCES},
+                     "gunw_pairs": {f"{a}_{b}": str(p) for (a, b), p in gp.items()},
+                     "runw_pairs": {f"{a}_{b}": str(v[0]) for (a, b), v in rp.items()},
                      "outputs": {str(out): sizeof(out)}, "code": {"git": git_rev()}})
     log(f"corrections: ok ({time.time() - t0:.0f} s)")
     return EXIT_OK
@@ -1091,6 +1224,8 @@ def main(argv=None) -> int:
     ap.add_argument("command", choices=["show", "status", "run", "_stage"])
     ap.add_argument("stage_name", nargs="?", help=argparse.SUPPRESS)
     ap.add_argument("--stage", choices=STAGES, help="run only this stage (default: all, in order)")
+    ap.add_argument("--through", choices=STAGES, help="run from the first stage through this one, e.g. --through ifg "
+                                                     "to stop after the interferograms")
     ap.add_argument("--pairs", nargs="+", help="ifg/unwrap units to process, as YYYYMMDD_YYYYMMDD")
     ap.add_argument("--force", action="store_true", help="redo units even when verified done")
     ap.add_argument("--dry-run", action="store_true")
@@ -1109,24 +1244,36 @@ def main(argv=None) -> int:
     if a.command == "_stage":                                   # child process, already in the right environment
         log = Log(ts.logdir / f"run_{a.stage_name}_{stamp()}.log")
         return run_stage_here(ts, a.stage_name, a, log)
+    if a.stage and a.through:
+        print("--stage and --through are alternatives: --stage runs one, --through runs every stage up to it", file=sys.stderr)
+        return EXIT_CONFIG
+    stages = [a.stage] if a.stage else list(STAGES[:STAGES.index(a.through) + 1] if a.through else STAGES)
+    what = a.stage or (f"through-{a.through}" if a.through else "all")
     if a.detach:
-        return detach(argv, ts, a.stage or "all")
-    log = Log(None if a.dry_run else ts.logdir / f"run_{a.stage or 'all'}_{stamp()}.log")
+        return detach(argv, ts, what)
+    log = Log(None if a.dry_run else ts.logdir / f"run_{what}_{stamp()}.log")
     log(f"nisar_timeseries {ts.name}: {len(ts.dates)} dates, {len(ts.pairs)} pairs, stack {ts.cg.stack_id} (git {git_rev()})")
     if not prereq_coreg(ts, log):
-        return EXIT_PREREQ
+        if not a.dry_run:
+            return EXIT_PREREQ
+        log("dry run: continuing anyway, to show the rest of the plan")
     try:
         select_pairs(ts, a)
     except ConfigErr as e:
         log(str(e))
         return EXIT_CONFIG
-    if ts.any_correction() and not connected(ts.dates, list(ts.gunw_pairs())):
-        log(f"GUNW pairs {sorted(ts.gunw_pairs())} do not connect the dates {ts.dates}; disable corrections or add GUNWs")
-        return EXIT_PREREQ
+    # only a run that reaches the corrections stage needs GUNWs, and only for the layers sourced from them: an
+    # interferogram-only case, or one whose ionosphere is split_spectrum, may have no L2_GUNW at all
+    if "corrections" in stages and ts.kinds_from("gunw") and not connected(ts.dates, list(ts.gunw_pairs())):
+        log(f"GUNW pairs {sorted(ts.gunw_pairs())} do not connect the dates {ts.dates}; "
+            f"these layers are sourced from them: {ts.kinds_from('gunw')}")
+        if not a.dry_run:
+            return EXIT_PREREQ
+        log("dry run: continuing anyway, to show the rest of the plan")
     if not params_gate(ts, log, a.dry_run):
         return EXIT_CONFIG
-    for s in ([a.stage] if a.stage else list(STAGES)):
-        py = ts.eff["envs"][STAGE_ENV[s]]
+    for s in stages:
+        py = ts.eff["envs"][STAGE_ENV[s]] or sys.executable    # null = this interpreter, as nisar_coreg does
         if a.dry_run:
             log(f"{s}: would run in {py}" + (f" for pairs {[ts.d12(p) for p in select_pairs(ts, a)]}" if s in ("ifg", "unwrap") else ""))
             continue

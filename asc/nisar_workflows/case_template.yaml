@@ -1,0 +1,65 @@
+# Template for case_studies/<NAME>/case.yaml.  Copy it, edit the first three keys, delete what you do not need.
+#   cp asc/nisar_workflows/case_template.yaml case_studies/<NAME>/case.yaml
+# Then:  python run_case.py -c case_studies/<NAME>/case.yaml show
+# How to run it: asc/README.md.  Every key here has a default; only `workflow` and `mode` are required.
+
+case: null                   # name; null -> the case directory name. Appears in the DEM and tmux session names.
+workflow: cropped_RSLC       # RSLC | cropped_RSLC | GSLC | cropped_GSLC
+mode: interferogram          # coregistration (stop at the registered stack) | interferogram
+
+slc_dir: SLC                 # L1 RSLCs, named NISAR_L1_<tier>_RSLC_*_<YYYYMMDD>T*.h5. Nothing is ever downloaded.
+aoi_kml: geometries/aoi.kml  # required for a cropped workflow and for any RSLC interferogram
+netrc: null                  # gs://... or a local path; installed as ~/.netrc (600) when that file is missing
+
+inputs:
+  tier: PR                   # PR provisional | UR urgent response. This selects WHICH L1 RSLC FILES are read, nothing
+                             # else; it has no bearing on the corrections, which come from the L2 GUNW or from us.
+  frequency: A               # A is the 40 MHz main band (5.65 m ground range). B is the 5 MHz side band (45 m): not a
+                             # resolution choice, it is what the split-spectrum ionosphere solves A against.
+  polarization: HH
+
+dates:
+  start: null                # YYYYMMDD; null -> the earliest RSLC in slc_dir
+  end: null                  # null -> the latest
+  reference: null            # RSLC reference date; null -> the middle date (minimises the summed temporal baseline)
+
+# Resolution. Give EITHER resolution_m (the preset: looks are worked out from this granule's own pixel spacing and
+# the AOI's incidence angle) OR the looks directly. Giving both is an error unless they agree.
+# RSLC on this track: 20 m -> 4x4, 40 m -> 9x8, 60 m -> 13x12, 80 m -> 18x16, 100 m -> 22x20.
+# Nothing here geocodes: an RSLC product stays in radar coordinates, with its geometry layers beside it.
+resolution_m: null
+looks: {azimuth: 9, range: 8}          # RSLC: interferogram looks, and the lattice the crop window is snapped to
+gslc: {posting_m: 5, looks_y: 8, looks_x: 8}   # GSLC: map grid in metres, then looks on it (8 x 8 on 5 m = 40 m)
+
+network:
+  max_connections: 3         # each date pairs with its next N dates
+  max_temporal_baseline_days: null
+  pairs: []                  # ["YYYYMMDD_YYYYMMDD", ...] overrides the two keys above
+
+# Where each correction comes from. `false` is shorthand for all none, `true` for all gunw.
+# Needs mode: interferogram and an RSLC workflow.
+corrections:
+  ionosphere: none           # gunw | split_spectrum | none
+                             #   gunw: the GUNW's own screen. Stored on an 80 m grid but filtered by the producer to a
+                             #     ~10 km feature scale, so it is a broad screen however finely it is sampled.
+                             #   split_spectrum: ours, solved from bands A and B on the interferogram's own lattice.
+                             #     Needs no GUNW. Costs roughly 1.5 h per pair, and only pairs against the stack
+                             #     reference are solved - that is already one screen per date.
+  troposphere: none          # gunw | none. The GUNW's is ECMWF HRES via RAiDER, on a 500 m x 20-height cube.
+                             #   UR-tier GUNWs carry no troposphere at all.
+  solid_earth_tides: none    # gunw | none. 500 m x 20-height cube.
+tag: null                    # appended to every product name, to run a variant beside a finished one
+
+upload:
+  destination: null          # gs://bucket/prefix -> mirrored at <destination>/<case>/...; null keeps everything local
+  enabled: true
+
+envs:                        # null -> the interpreter running run_case.py (coreg) and the ts defaults (time series)
+  isce3_python: null
+  ts_python: null
+
+# Escape hatch: merged verbatim over the generated module configs, for any parameter the keys above do not expose.
+# The values in coreg_configs/defaults.yaml and ts_configs/defaults.yaml are the validated ones - ask before moving one.
+advanced:
+  coreg: {}                  # e.g. {rslc: {dense_offsets: {skip_range: 64, skip_azimuth: 64}}, run: {jobs: 1}}
+  timeseries: {}             # e.g. {unwrap: {cost: defo}, mintpy: {mask_dataset: "no"}}

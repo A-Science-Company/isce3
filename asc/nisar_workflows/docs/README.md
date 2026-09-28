@@ -5,7 +5,8 @@ Purpose: the evidence base for automating a modular NISAR SLC → interferogram 
 
 | document | what it covers |
 |---|---|
-| [../README.md](../README.md) | **Start here to run anything**: every module, driver and tool with its arguments, the three-command pipeline, and a runnable recipe for each of the four workflows (WF1–WF4) |
+| [../../README.md](../../README.md) | **Start here to run a case**: `run_case.py`, the case directory layout, `case.yaml` key by key, the four workflows × two modes, GCS upload, costs and failure modes |
+| [../README.md](../README.md) | **The reference underneath it**: every module, driver and tool with its arguments, the three-command pipeline, and a runnable recipe for each of the four workflows (WF1–WF4) |
 | [COREG_MODULE.md](COREG_MODULE.md) | **`nisar_coreg.py`**: config-driven coregistration module (RSLC/GSLC, optional crop, reference date), stages, outputs, job semantics |
 | [glof_event report](../../case_studies/nepal_nisar_ascending/report/glof_event/nepal_glof_nisar_event_report.html) | **Event study**: NISAR analysis of the 26 Aug 2026 outburst (pre-event limits, coherence, backscatter change, controls); built by `tools/glof_event_analysis.py` + `tools/build_glof_event_report.py` |
 | [VM_HANDOVER_ANSWERS_2.md](VM_HANDOVER_ANSWERS_2.md) | **Handover Q&A round 2 (2026-09-18)**: the measurements — range misregistration across all seven dates, the crop-buffer shrink, side-band alignment — plus the 84-probe assessment and the GUNW baseline cross-check |

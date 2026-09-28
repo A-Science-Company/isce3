@@ -6,6 +6,10 @@
 # nisar_coreg.py records the effective values in <stack>/params.json and refuses to continue a stack whose values
 # changed; set `tag:` in the case config to start a separately named stack instead.
 
+envs:
+  isce3_python: null         # interpreter for the drivers and the subsetter; null = the one running nisar_coreg.py
+                             # (must be an isce3 environment, e.g. /home/sharath/miniforge3/envs/isce3_env/bin/python)
+
 inputs:
   rslc_dir: L1_RSLC          # relative to workdir; files must be named NISAR_L1_<tier>_RSLC_*_<YYYYMMDD>T*.h5
   tier: PR                   # PR provisional / UR urgent response
@@ -21,8 +25,36 @@ crop_buffers:                # tools/rslc_subset.py, radar-domain window around 
   buffer_az_lines: 1000      # sized for ISCE3's ionosphere kernel; kept although the ionosphere now comes from GUNW
   buffer_range_m: 12500
   buffer_px: 500             # ~5x the dense-offsets dead band at the window edge
+  align_az_looks: 9          # the crop window origin and size are snapped to multiples of these looks, so the cropped
+  align_rg_looks: 8          # multilook grid lands on the full tile's. Keep them equal to the looks the interferogram
+                             # will use (ts_configs/defaults.yaml `looks`), or the two lattices disagree.
 
-rslc:                        # ISCE3 insar stages that coregister. Looks are fixed at 1x1: no coregistration stage uses them.
+rslc:                        # ISCE3 insar stages that coregister
+  interferogram:             # the RIFG ISCE3 writes per pair alongside the coregistered SLC. No coregistration stage
+    looks: {azimuth: 1, range: 1}   # uses these looks; 1x1 is what nisar_timeseries.py's RIFG gate checks against, and
+                             # the looks are in the product name (ifg/RIFG_<ref>_<sec>_<F>_<P>_<az>x<rg>.h5).
+  unwrap:                    # snaphu inside ISCE3, needed only because the ionosphere solve consumes unwrapped phase
+    enabled: false           # true on its own gives a RUNW; the time series does its own unwrapping for the science
+    azimuth: 9               # the 9 x 8 grid the crop lattice is snapped to (crop_buffers.align_*_looks must match)
+    range: 8
+    nlooks: 44.57            # = 9 * 8 * 0.619, ISCE3's effective-looks formula. MUST be set: ISCE3 otherwise derives
+                             # it from the 1x1 crossmul grid and snaphu aborts with "nlooks must be >= 1, got 0.619"
+    algorithm: snaphu
+    ntiles: [4, 4]           # validated crop-v2 values (configs/nepal_glof_aoi_v2.yaml), not the driver's [8,8]
+    tile_overlap: [256, 256]
+    nproc: 8
+    bridge_enabled: true
+    single_tile_reoptimize: false   # both default true in snaphu and re-solve the whole grid: 69 GB at 1x1
+    regrow_conncomps: false
+
+  ionosphere:                # split-spectrum, computed by us instead of taken from a GUNW
+    enabled: false           # true implies unwrap (product_type RUNW); requires frequency A and a side band (B)
+    spectral_diversity: main_side_band   # split_main_band | main_side_band | main_diff_ms_band | main_diff_low_high_subband
+    lines_per_block: 1000
+    filter_enabled: true
+    filter_coherence_threshold: 0.5
+    median_filter_size: 15
+
   rdr2geo: {threshold: 1.0e-7, numiter: 25, extraiter: 10}
   geo2rdr: {threshold: 1.0e-8, maxiter: 25}
   coarse_resample: {lines_per_tile: 1000, columns_per_tile: 1000}
@@ -43,6 +75,12 @@ rslc:                        # ISCE3 insar stages that coregister. Looks are fix
 gslc:                        # mode GSLC: each date geocoded independently onto one pinned map grid (not registered)
   frequencies: [A]
   posting_m: 5
+  interferogram:             # map-domain interferogram from the geocoded stack (Track G step 6), stage `igram`
+    enabled: false           # true: form it after the stack is geocoded
+    looks_y: 8               # 8 x 8 on the 5 m grid = 40 m x 40 m, as the validated WF4 pass used (docs/WF4_GSLC_CROPPED.md).
+    looks_x: 8               # The looks are in the product name, so changing them writes a new file instead of overwriting
+    coherence_window: 5      # sliding-window coherence estimator, used when the look box has fewer than 4 samples
+    pairs: []                # ["YYYYMMDD_YYYYMMDD", ...]; [] = consecutive dates
 
 run:
   jobs: 2                    # units in parallel
