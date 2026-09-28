@@ -800,6 +800,17 @@ class TrackRConfig:
     ionosphere_filter_enabled: bool = True
     ionosphere_filter_coherence_threshold: float = 0.5
     ionosphere_median_filter_size: int = 15
+    #: The Gaussian that sets the screen's resolution, in PIXELS OF THE SOLVE
+    #: GRID -- so its physical size follows the unwrap looks (and, for
+    #: main_side_band, the A/B band ratio in range). ISCE3's defaults are 100 px
+    #: kernel / 33 px sigma; on the validated 9x8 crop that is about 6.6 km in
+    #: range and 1.3 km in azimuth. The ionosphere is smooth, so a sigma far
+    #: below the real screen's scale mostly amplifies the ~17x separation noise.
+    ionosphere_filter_kernel_range: int = 100
+    ionosphere_filter_kernel_azimuth: int = 100
+    ionosphere_filter_sigma_range: float = 33.0
+    ionosphere_filter_sigma_azimuth: float = 33.0
+    ionosphere_filter_iterations: int = 1
 
     pair_dir_template: str = "pairs/{ref}_{sec}/trackR"
 
@@ -872,6 +883,27 @@ class TrackRConfig:
                 f"'{self.ionosphere_spectral_diversity}' invalid; "
                 f"choose from {list(valid_sd)}"
             )
+
+        for name in ("ionosphere_filter_sigma_range", "ionosphere_filter_sigma_azimuth"):
+            if float(getattr(self, name)) < 1:
+                raise ConfigError(
+                    f"track_r.{name} must be >= 1 pixel (the ISCE3 schema's own bound). "
+                    f"It is a sigma in pixels of the ionosphere solve grid, not in metres"
+                )
+        for name in ("ionosphere_filter_kernel_range", "ionosphere_filter_kernel_azimuth"):
+            if int(getattr(self, name)) < 1:
+                raise ConfigError(f"track_r.{name} must be >= 1")
+        if not 1 <= int(self.ionosphere_filter_iterations) <= 10:
+            raise ConfigError("track_r.ionosphere_filter_iterations must be between 1 and 10")
+        for k, sig in (("range", self.ionosphere_filter_sigma_range),
+                       ("azimuth", self.ionosphere_filter_sigma_azimuth)):
+            ker = int(getattr(self, f"ionosphere_filter_kernel_{k}"))
+            if ker < 2 * float(sig):
+                warnings.append(
+                    f"track_r.ionosphere_filter_kernel_{k} ({ker} px) is under 2 sigma "
+                    f"({sig} px); the Gaussian is truncated, so the screen is smoothed less "
+                    f"than the sigma implies. ISCE3's own defaults are 100 px for sigma 33"
+                )
 
         for name in ("phase_unwrap_range_looks", "phase_unwrap_azimuth_looks"):
             if int(getattr(self, name)) < 1:

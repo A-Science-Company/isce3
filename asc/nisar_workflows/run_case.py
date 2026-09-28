@@ -69,6 +69,9 @@ CASE_DEFAULTS = {
     "network": {"max_connections": 3, "max_temporal_baseline_days": None, "pairs": []},
     # where each correction comes from. false is shorthand for all none, true for all gunw.
     "corrections": {"ionosphere": "none", "troposphere": "none", "solid_earth_tides": "none"},
+    # only read when corrections.ionosphere is split_spectrum. The smoothing that sets the screen's resolution,
+    # given in metres because the pixels it is specified in depend on the looks. null = ISCE3's own default.
+    "ionosphere": {"sigma_range_m": None, "sigma_azimuth_m": None},
     "tag": None,                  # appended to the product names, to run a variant beside a finished one
     "upload": {"destination": None, "enabled": True},        # gs://bucket/prefix; null destination = stay local
     "envs": {"isce3_python": None, "ts_python": None},
@@ -190,6 +193,8 @@ class Case:
         with h5py.File(self.granule(), "r") as h:
             sw = h[f"science/LSAR/RSLC/swaths/frequency{fr}"]
             sr, az = float(sw["slantRangeSpacing"][()]), float(sw["sceneCenterAlongTrackSpacing"][()])
+            sb = h.get("science/LSAR/RSLC/swaths/frequencyB/slantRangeSpacing")
+            band_ratio = round(float(sb[()]) / sr) if sb is not None else 1
             g = h["science/LSAR/RSLC/metadata/geolocationGrid"]
             epsg = int(g["epsg"][()])
             if epsg != 4326:
@@ -205,6 +210,7 @@ class Case:
                           f"grid (they are ~700 m apart), too few to resolve looks. Give looks explicitly instead")
         i = float(np.mean(inc[sel]))
         return az, sr / float(np.sin(np.radians(i))), {
+            "band_ratio": band_ratio,
             "incidence_deg": round(i, 4), "incidence_min_deg": round(float(inc[sel].min()), 4),
             "incidence_max_deg": round(float(inc[sel].max()), 4), "geolocation_nodes": int(sel.sum()),
             "azimuth_spacing_m": round(az, 6), "slant_range_spacing_m": round(sr, 6)}
@@ -243,6 +249,39 @@ class Case:
                         "actual_azimuth_m": round(got["azimuth"] * az_m, 2),
                         "actual_ground_range_m": round(got["range"] * rg_m, 2)}
 
+    def ionosphere_filter(self):
+        """The dispersive filter in both units, for a split-spectrum run.
+
+        ISCE3 takes the Gaussian in pixels of the SOLVE grid: for main_side_band that is the frequency-B grid at the
+        unwrap looks, so one pixel is (azimuth looks x azimuth spacing) by (range looks x slant spacing x the A/B band
+        ratio) -- the physical smoothing therefore moves with the looks. Returns (overrides for the coreg config, a
+        dict describing it) or (None, None) when this case has no split-spectrum ionosphere.
+        """
+        if self.corr["ionosphere"] != "split_spectrum":
+            return None, None
+        az_m, grng_m, how = self.ground_spacing()
+        lk = self.c["looks"]
+        px_az = float(lk["azimuth"]) * az_m                                  # metres per solve-grid pixel
+        px_rg = float(lk["range"]) * grng_m * float(how["band_ratio"])
+        want = self.c["ionosphere"]
+        over, sig = {}, {}
+        for axis, px, key in (("azimuth", px_az, "sigma_azimuth_m"), ("range", px_rg, "sigma_range_m")):
+            if want[key] is None:
+                sig[axis] = {"sigma_px": 33.0, "kernel_px": 100, "given": "ISCE3 default"}
+            else:
+                n = float(want[key]) / px
+                if n < 1:
+                    raise CaseErr(f"ionosphere.{key} {want[key]:g} m is under one pixel of the solve grid "
+                                  f"({px:.0f} m in {axis}); ISCE3 requires sigma >= 1 px. The smallest you can ask "
+                                  f"for at {lk['azimuth']}x{lk['range']} looks is {px:.0f} m")
+                sig[axis] = {"sigma_px": round(n, 2), "kernel_px": max(2, int(round(3 * n))), "given": f"{want[key]:g} m"}
+                over[f"filter_sigma_{axis}"] = round(n, 2)
+                over[f"filter_kernel_{axis}"] = max(2, int(round(3 * n)))
+        for axis, px in (("azimuth", px_az), ("range", px_rg)):
+            sig[axis] |= {"pixel_m": round(px, 1), "sigma_m": round(sig[axis]["sigma_px"] * px, 1),
+                          "kernel_m": round(sig[axis]["kernel_px"] * px, 1)}
+        return over, sig
+
     def abs(self, p) -> Path:
         q = Path(str(p)).expanduser()
         return q if q.is_absolute() else (self.dir / q)
@@ -267,8 +306,9 @@ class Case:
         if self.corr["ionosphere"] == "split_spectrum":
             # our own screen: ISCE3 unwraps on the same lattice the interferogram uses, so the time series can slice
             # the screen straight onto its grid instead of interpolating it
+            over, _ = self.ionosphere_filter()
             raw.setdefault("rslc", {})
-            raw["rslc"] |= {"ionosphere": {"enabled": True},
+            raw["rslc"] |= {"ionosphere": {"enabled": True, **(over or {})},
                             "unwrap": {"enabled": True, "azimuth": int(lk["azimuth"]), "range": int(lk["range"])}}
         if self.coreg_mode == "GSLC":
             g = c["gslc"]
@@ -457,6 +497,14 @@ def cmd_show(case: Case, a) -> int:
                   f"on the {d['posting_m']:g} m grid")
     src = ", ".join(f"{k.replace('_', ' ')}: {v}" for k, v in case.corr.items() if v != "none") or "off"
     print(f"corrections  {src}")
+    _, sig = case.ionosphere_filter()
+    if sig:
+        for axis in ("range", "azimuth"):
+            d = sig[axis]
+            g = " ground" if axis == "range" else ""
+            print(f"  iono {axis:7s} solve pixel {d['pixel_m']:g} m{g}; sigma {d['sigma_px']:g} px "
+                  f"= {d['sigma_m'] / 1000:.2f} km{g}, kernel {d['kernel_px']} px "
+                  f"= {d['kernel_m'] / 1000:.1f} km  ({d['given']})")
     print(f"netrc        {c['netrc'] or '(not managed here; ~/.netrc must already exist)'}")
     print(f"upload       {case.destination() or '(local only)'}")
     print(f"\ngenerated configs\n  {case.coreg_cfg}" + (f"\n  {case.ts_cfg}" if case.needs_ts() else ""))

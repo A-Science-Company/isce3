@@ -394,6 +394,15 @@ def render_runconfig(cfg: Config, stack: dict, ref: str, sec: str) -> dict:
                     "filter_coherence_threshold": float(
                         tr.ionosphere_filter_coherence_threshold),
                     "median_filter_size": int(tr.ionosphere_median_filter_size),
+                    # The Gaussian sets the screen's resolution. Pixels here are
+                    # pixels of the SOLVE grid, which for main_side_band is the
+                    # frequency-B grid at the unwrap looks -- so the physical
+                    # size follows the looks and the A/B band ratio.
+                    "kernel_range": int(tr.ionosphere_filter_kernel_range),
+                    "kernel_azimuth": int(tr.ionosphere_filter_kernel_azimuth),
+                    "sigma_range": float(tr.ionosphere_filter_sigma_range),
+                    "sigma_azimuth": float(tr.ionosphere_filter_sigma_azimuth),
+                    "filter_iterations": int(tr.ionosphere_filter_iterations),
                 },
             }
         }

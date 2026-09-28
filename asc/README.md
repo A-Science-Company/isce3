@@ -436,10 +436,30 @@ resolution. Two different scales are involved and they are worth keeping apart:
 So the 80 m grid is oversampling a field with tens of kilometres of structure. Computing it ourselves does **not**
 buy a sharper screen — with ISCE3's defaults it is the other way round: ISCE3's Gaussian is σ 33 px on the solve
 grid, about 6.6 km in range at 9 × 8 looks, i.e. coarser in range than the GUNW's own filter. What computing it
-ourselves buys is independence from GUNW availability, and the fact that the filter is specified in *pixels*: its
-physical size follows your looks, so a finer solve grid gives a finer screen. (The σ itself is an ISCE3 default and
-is not currently exposed as a config key — `rslc.ionosphere` reaches the filter's on/off, coherence threshold and
-median size, not its width.)
+ourselves buys is independence from GUNW availability, and control of the smoothing — which is a setting:
+
+```yaml
+corrections: {ionosphere: split_spectrum}
+ionosphere:
+  sigma_range_m: 3000        # null = ISCE3's default of 33 pixels on the solve grid
+  sigma_azimuth_m: 1000
+```
+
+ISCE3 takes the Gaussian in **pixels of the solve grid**, which for `main_side_band` is the frequency-B grid at your
+unwrap looks — so one pixel is (azimuth looks × azimuth spacing) by (range looks × slant spacing × the A/B band
+ratio, 8 here), and the physical smoothing moves with your looks. Giving it in metres lets `run_case.py` do that
+conversion against the granule, and `show` prints both:
+
+```
+iono range   solve pixel 316.7 m ground; sigma 33 px = 10.45 km ground, kernel 100 px = 31.7 km  (ISCE3 default)
+iono azimuth solve pixel 40.1 m; sigma 33 px = 1.32 km, kernel 100 px = 4.0 km  (ISCE3 default)
+```
+
+Mind the convention when comparing with the docs: `WF3_RSLC_CROPPED.md` quotes σ ≈ 6.6 km in **slant** range, which
+is the same thing as 10.45 km on the ground at this incidence. Asking for less smoothing than one solve pixel is
+refused (ISCE3's own bound is σ ≥ 1 px), and a kernel under 2σ truncates the Gaussian, which the driver warns about.
+Going much below the screen's real scale mostly amplifies the ~17× noise that the dispersive separation introduces —
+which is why the filter is not optional here.
 
 **What a split-spectrum run does.** `corrections: {ionosphere: split_spectrum}` turns on the ISCE3 ionosphere inside
 the coregistration: each pair becomes a RUNW instead of a RIFG, unwrapped at your interferogram looks, carrying

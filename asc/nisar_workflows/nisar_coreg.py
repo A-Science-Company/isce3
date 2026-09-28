@@ -542,6 +542,11 @@ def rslc_stack_raw(cg: Coreg) -> dict:
             "ionosphere_filter_enabled": bool(i["filter_enabled"]),
             "ionosphere_filter_coherence_threshold": float(i["filter_coherence_threshold"]),
             "ionosphere_median_filter_size": int(i["median_filter_size"]),
+            "ionosphere_filter_sigma_range": float(i["filter_sigma_range"]),
+            "ionosphere_filter_sigma_azimuth": float(i["filter_sigma_azimuth"]),
+            "ionosphere_filter_kernel_range": int(i["filter_kernel_range"]),
+            "ionosphere_filter_kernel_azimuth": int(i["filter_kernel_azimuth"]),
+            "ionosphere_filter_iterations": int(i["filter_iterations"]),
         }
     return raw
 

@@ -48,6 +48,14 @@ corrections:
   troposphere: none          # gunw | none. The GUNW's is ECMWF HRES via RAiDER, on a 500 m x 20-height cube.
                              #   UR-tier GUNWs carry no troposphere at all.
   solid_earth_tides: none    # gunw | none. 500 m x 20-height cube.
+
+# Only read when corrections.ionosphere is split_spectrum. This is the smoothing that sets the screen's resolution.
+# ISCE3 takes it in pixels of the solve grid (the frequency-B grid at your unwrap looks), so it is given here in
+# metres and converted against the granule; `show` prints both. null = ISCE3's default of 33 px, which on a 9 x 8
+# crop of this track is 10.45 km in ground range and 1.32 km in azimuth. Below one solve pixel is refused.
+ionosphere:
+  sigma_range_m: null
+  sigma_azimuth_m: null
 tag: null                    # appended to every product name, to run a variant beside a finished one
 
 upload:

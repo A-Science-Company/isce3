@@ -68,6 +68,7 @@ any key by repeating its section, e.g. `rslc: {dense_offsets: {skip_range: 64}}`
 | `rslc.crossmul` | flatten, oversample (the 1×1 RIFG) | true, 2 |
 | `rslc.unwrap` | ISCE3's snaphu, only needed because the ionosphere solve consumes unwrapped phase | off; 9 × 8, nlooks 44.57, tiles [4,4] overlap [256,256] nproc 8 (crop v2) |
 | `rslc.ionosphere` | split-spectrum solve (`main_side_band`), dispersive filter | off; filter on, coherence 0.5, median 15 |
+| `rslc.ionosphere.filter_sigma_*`, `filter_kernel_*`, `filter_iterations` | the Gaussian that sets the screen's resolution, in pixels of the solve grid (frequency B at the unwrap looks, so its physical size follows the looks) | ISCE3's 33 px sigma / 100 px kernel / 1 iteration = 10.45 km ground range x 1.32 km azimuth on the validated 9x8 crop. `run_case.py` takes it in metres and converts |
 | `gslc` | GSLC bands and posting | A, 5 m |
 | `gslc.interferogram` | map-domain interferogram after geocoding: on/off, looks on the map grid, coherence window, pairs | off; 8×8 (40 m on the 5 m grid); 5; consecutive dates |
 | `run` | parallel units, prune scratch, disk margin, block memory | 2, true, 30 GB, 256 MB |
